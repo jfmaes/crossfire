@@ -6,6 +6,11 @@ interface SpecResult {
   summary: string;
 }
 
+function artifactUrl(sessionId: string, type: string): string {
+  const token = localStorage.getItem("council-token") ?? "local-dev-token";
+  return `/artifacts/${sessionId}/${type}?token=${encodeURIComponent(token)}`;
+}
+
 export function SpecCard({
   result,
   isFinalized,
@@ -30,7 +35,7 @@ export function SpecCard({
         <div className="spec-downloads">
           <a
             className="spec-download-btn"
-            href={`/artifacts/${sessionId}/spec`}
+            href={artifactUrl(sessionId, "spec")}
             download={`${sessionId}-spec.md`}
           >
             Download Spec (.md)
@@ -38,7 +43,7 @@ export function SpecCard({
           {result.implementationPlan && (
             <a
               className="spec-download-btn"
-              href={`/artifacts/${sessionId}/plan`}
+              href={artifactUrl(sessionId, "plan")}
               download={`${sessionId}-plan.md`}
             >
               Download Implementation Plan (.md)

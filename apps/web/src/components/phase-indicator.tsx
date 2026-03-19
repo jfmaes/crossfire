@@ -1,5 +1,5 @@
 const PHASES = [
-  { key: "analysis", label: "Analysis & Questions" },
+  { key: "analysis", label: "Analysis" },
   { key: "interview", label: "Interview" },
   { key: "approach_debate", label: "Approach Debate" },
   { key: "spec_generation", label: "Spec Generation" }

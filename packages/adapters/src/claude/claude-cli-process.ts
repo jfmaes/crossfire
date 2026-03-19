@@ -21,37 +21,47 @@ function defaultSpawnProcess(command: string, args: string[]): SpawnedChild {
   });
 }
 
+interface ExtractedResult {
+  text: string | null;
+  cliSessionId?: string;
+}
+
 /**
  * Extract the actual model response from Claude CLI output.
  * Handles multiple wrapping layers:
  * 1. CLI JSON envelope: {"type":"result","result":"...","structured_output":{...}}
  * 2. Code fences inside result: ```json\n{...}\n```
  * 3. structured_output as string or object
+ * Also extracts session_id for conversation resumption.
  */
-function extractResultText(rawOutput: string): string | null {
+function extractResult(rawOutput: string): ExtractedResult {
   try {
     const parsed = JSON.parse(rawOutput) as {
       structured_output?: unknown;
       result?: string;
+      session_id?: string;
     };
+
+    const cliSessionId = parsed.session_id;
 
     // Prefer structured_output (JSON schema mode)
     if (parsed.structured_output != null) {
-      return typeof parsed.structured_output === "string"
+      const text = typeof parsed.structured_output === "string"
         ? parsed.structured_output
         : JSON.stringify(parsed.structured_output);
+      return { text, cliSessionId };
     }
 
     // Fall back to result field (plain text mode)
     if (typeof parsed.result === "string") {
-      return parsed.result;
+      return { text: parsed.result, cliSessionId };
     }
 
     // No recognized fields — return raw
-    return rawOutput;
+    return { text: rawOutput, cliSessionId };
   } catch {
     // rawOutput isn't JSON — might be plain text or a partial response
-    return rawOutput || null;
+    return { text: rawOutput || null };
   }
 }
 
@@ -70,16 +80,23 @@ export class ClaudeCliProcess implements ClaudeProcess {
     this.timeoutMs = input.timeoutMs ?? 300_000;
   }
 
-  async *runTurn(input: { sessionId: string; prompt: string; degraded?: boolean }) {
-    const child = this.spawnProcess(this.command, [
+  async *runTurn(input: { sessionId: string; prompt: string; degraded?: boolean; resumeSessionId?: string }) {
+    const args = [
       "-p",
       "--dangerously-skip-permissions",
       "--output-format",
       "json",
       "--json-schema",
-      JSON.stringify(modelTurnSchemaJson),
-      input.prompt
-    ]);
+      JSON.stringify(modelTurnSchemaJson)
+    ];
+
+    if (input.resumeSessionId) {
+      args.push("--resume", input.resumeSessionId);
+    }
+
+    args.push(input.prompt);
+
+    const child = this.spawnProcess(this.command, args);
 
     const stderrEvents: ClaudeProcessEvent[] = [];
     const stdoutChunks: string[] = [];
@@ -120,9 +137,9 @@ export class ClaudeCliProcess implements ClaudeProcess {
 
     const rawOutput = stdoutChunks.join("");
 
-    const text = extractResultText(rawOutput);
-    if (text !== null) {
-      yield { type: "result", text } as const;
+    const result = extractResult(rawOutput);
+    if (result.text !== null) {
+      yield { type: "result", text: result.text, cliSessionId: result.cliSessionId } as const;
     } else {
       yield { type: "error", message: "Claude result parse failed" } as const;
     }

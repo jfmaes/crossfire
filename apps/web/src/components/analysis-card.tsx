@@ -29,24 +29,6 @@ export function AnalysisCard({ result }: { result: AnalysisResult }) {
           <MarkdownContent text={result.claudeAnalysis} className="analysis-text" />
         </div>
       </div>
-
-      {result.proposedQuestions.length > 0 && (
-        <div className="checkpoint-section">
-          <h3>Proposed Interview Questions</h3>
-          <ol className="question-list">
-            {result.proposedQuestions.map((q, i) => (
-              <li key={i} className="question-item">
-                <span className="question-priority">P{q.priority}</span>
-                <div>
-                  <p className="question-text">{q.text}</p>
-                  <p className="question-rationale">{q.rationale}</p>
-                  <span className="question-source">Proposed by: {q.proposedBy}</span>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
     </article>
   );
 }

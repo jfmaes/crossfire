@@ -1,7 +1,8 @@
 import type { FastifyInstance } from "fastify";
+import { SessionConflictError } from "../services/session-service";
 
 interface SessionService {
-  createSession(input: { title: string; prompt: string; groundingRoot?: string }): Promise<Record<string, unknown>>;
+  createSession(input: { title: string; prompt: string }): Promise<Record<string, unknown>>;
   continueSession(input: { id: string; humanResponse: string }): Promise<Record<string, unknown> | null>;
   restartSession(id: string): Promise<Record<string, unknown> | null>;
   deleteSession(id: string): void;
@@ -21,14 +22,13 @@ export async function registerSessionRoutes(
     const body = request.body as Record<string, unknown> | null;
     const title = typeof body?.title === "string" ? body.title.trim() : "";
     const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
-    const groundingRoot = typeof body?.groundingRoot === "string" ? body.groundingRoot.trim() : undefined;
 
     if (!title || !prompt) {
       return reply.code(400).send({ error: "title and prompt are required" });
     }
 
     try {
-      const created = await input.sessionService.createSession({ title, prompt, groundingRoot });
+      const created = await input.sessionService.createSession({ title, prompt });
       return reply.code(201).send(created);
     } catch (error) {
       request.log.error(error, "session creation failed");
@@ -61,6 +61,9 @@ export async function registerSessionRoutes(
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (error instanceof SessionConflictError) {
+        return reply.code(409).send({ error: "session is already processing" });
+      }
       request.log.error(error, "session continuation failed");
       return reply.code(500).send({ error: "session continuation failed" });
     }
@@ -90,6 +93,9 @@ export async function registerSessionRoutes(
 
       return reply.code(200).send(result);
     } catch (error) {
+      if (error instanceof SessionConflictError) {
+        return reply.code(409).send({ error: "session is already processing" });
+      }
       request.log.error(error, "session restart failed");
       return reply.code(500).send({ error: "session restart failed" });
     }

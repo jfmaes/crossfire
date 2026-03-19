@@ -7,9 +7,16 @@ coverage
 # Runtime data
 data/
 
+# Environment secrets
+.env
+.env.*
+
 # Test artifacts
 playwright-report
 test-results
+
+# Planning docs
+FUTURE_ROADMAP.md
 
 # Editor / OS
 .idea

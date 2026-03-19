@@ -39,7 +39,7 @@ describe("session-service spec-driven lifecycle", () => {
     });
   }
 
-  it("creates a session with analysis + question debate in one step", async () => {
+  it("creates a session and auto-advances to interview", async () => {
     const service = createService();
 
     const result = await service.createSession({
@@ -47,30 +47,11 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Design a collaborative editor"
     });
 
-    // The analysis phase includes both independent analysis AND question debate
-    expect(result.session.phase).toBe("analysis");
-    expect(result.session.status).toBe("checkpoint");
-    expect((result as Record<string, unknown>).phaseResult).toBeDefined();
+    // Analysis runs and auto-advances to interview — no checkpoint in between
+    expect(result.session.phase).toBe("interview");
+    expect(result.session.status).toBe("interviewing");
+    expect((result as Record<string, unknown>).analysisResult).toBeDefined();
     expect((result as Record<string, unknown>).interviewState).toBeDefined();
-  });
-
-  it("transitions from analysis directly to interview on continue", async () => {
-    const service = createService();
-
-    const created = await service.createSession({
-      title: "Spec workshop",
-      prompt: "Design an API"
-    });
-
-    // analysis → interview
-    const continued = await service.continueSession({
-      id: created.session.id,
-      humanResponse: "Start the interview"
-    });
-
-    expect(continued).not.toBeNull();
-    expect(continued!.session.phase).toBe("interview");
-    expect(continued!.session.status).toBe("interviewing");
   });
 
   it("handles interview answers and advances to approach_debate", async () => {
@@ -81,13 +62,8 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
-    // analysis → interview
-    await service.continueSession({
-      id: created.session.id,
-      humanResponse: "Start"
-    });
-
-    // interview → send "enough" to skip
+    // Session starts in interview; send "enough" to skip to approach debate
+    expect(created.session.phase).toBe("interview");
     const afterEnough = await service.continueSession({
       id: created.session.id,
       humanResponse: "enough"
@@ -105,7 +81,6 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
-    await service.continueSession({ id: created.session.id, humanResponse: "Start" });
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
     const result = await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
 
@@ -121,7 +96,6 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
-    await service.continueSession({ id: created.session.id, humanResponse: "Start" });
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
     await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
 
@@ -139,7 +113,6 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
-    await service.continueSession({ id: created.session.id, humanResponse: "Start" });
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
     await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
 
@@ -184,7 +157,9 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Test error recovery"
     });
 
+    // Simulate an error during interview phase
     repository.updateStatus({ id: created.session.id, status: "errored" });
+    repository.updatePhase({ id: created.session.id, phase: "interview" });
 
     const recovered = await service.continueSession({
       id: created.session.id,

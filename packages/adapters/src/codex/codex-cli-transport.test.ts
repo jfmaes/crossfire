@@ -73,6 +73,7 @@ describe("CodexCliTransport", () => {
     }
 
     expect(events).toEqual([
+      { kind: "thread_started", threadId: "thread-1" },
       { kind: "stderr", text: "codex stderr" },
       { kind: "result", text: "codex-ok" }
     ]);

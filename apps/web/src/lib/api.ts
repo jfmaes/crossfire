@@ -32,6 +32,17 @@ export interface SessionPayload {
   };
   artifactPath?: string | null;
   phaseResult?: unknown;
+  analysisResult?: {
+    gptAnalysis: string;
+    claudeAnalysis: string;
+    proposedQuestions: Array<{
+      text: string;
+      priority: number;
+      rationale: string;
+      proposedBy: string;
+    }>;
+    debateSummary?: string;
+  };
   interviewState?: InterviewState;
 }
 
@@ -51,16 +62,12 @@ export async function createSession(input: {
   title: string;
   prompt: string;
   token: string;
-  groundingRoot?: string;
   baseUrl?: string;
 }) {
-  const body: Record<string, string> = {
+  const body = {
     title: input.title,
     prompt: input.prompt
   };
-  if (input.groundingRoot) {
-    body.groundingRoot = input.groundingRoot;
-  }
 
   const response = await fetch(`${input.baseUrl ?? ""}/sessions`, {
     method: "POST",

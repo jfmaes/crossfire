@@ -1,4 +1,5 @@
-import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
+import { writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 let enabled = false;
@@ -8,7 +9,7 @@ export function enableDebugLogging(dir?: string): void {
   enabled = true;
   if (dir) logDir = dir;
   if (!existsSync(logDir)) {
-    mkdirSync(logDir, { recursive: true });
+    mkdir(logDir, { recursive: true }).catch(() => {});
   }
   console.log(`  [DEBUG] Prompt logging enabled → ${logDir}/`);
 }
@@ -42,8 +43,9 @@ export function debugLogPrompt(opts: {
     ""
   ].join("\n");
 
-  writeFileSync(filePath, header + opts.prompt, "utf-8");
-  console.log(`  [DEBUG] Prompt logged → ${fileName} (${opts.prompt.length} chars)`);
+  writeFile(filePath, header + opts.prompt, "utf-8").catch(() => {
+    // Non-fatal — don't crash the daemon over debug logging
+  });
 }
 
 export function debugLogResponse(opts: {
@@ -83,6 +85,7 @@ export function debugLogResponse(opts: {
     ? JSON.stringify(opts.parsed, null, 2)
     : opts.rawText;
 
-  writeFileSync(filePath, header + body, "utf-8");
-  console.log(`  [DEBUG] Response logged → ${fileName} (${opts.rawText.length} chars, ${disagreements.length} disagreements)`);
+  writeFile(filePath, header + body, "utf-8").catch(() => {
+    // Non-fatal — don't crash the daemon over debug logging
+  });
 }

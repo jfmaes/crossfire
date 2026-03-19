@@ -16,17 +16,22 @@ export function ProgressFeed({ sessionId }: { sessionId: string | null }) {
 
   useEffect(() => {
     if (typeof EventSource === "undefined") return;
-    const source = new EventSource("/progress");
+    const token = localStorage.getItem("council-token") ?? "local-dev-token";
+    const source = new EventSource(`/progress?token=${encodeURIComponent(token)}`);
 
     source.onmessage = (e) => {
       try {
-        const event = JSON.parse(e.data) as ProgressEvent;
+        const event = JSON.parse(e.data as string) as ProgressEvent;
         if (!sessionId || event.sessionId === sessionId) {
           setEvents((prev) => [...prev.slice(-30), event]);
         }
       } catch {
         // Ignore malformed events
       }
+    };
+
+    source.onerror = () => {
+      // Connection lost — EventSource auto-reconnects
     };
 
     return () => source.close();

@@ -14,7 +14,7 @@
     "tsx": "^4.20.6"
   },
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx watch --clear-screen=false src/main.ts < /dev/null",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run"
   }

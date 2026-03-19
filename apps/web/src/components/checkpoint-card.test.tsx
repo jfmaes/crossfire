@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { CheckpointCard } from "./checkpoint-card";
 
 describe("CheckpointCard", () => {
+  afterEach(cleanup);
   it("renders decisions needed and open risks", () => {
     render(
       <CheckpointCard
@@ -20,6 +21,23 @@ describe("CheckpointCard", () => {
 
     expect(screen.getByText("Confirm the default checkpoint interval")).toBeTruthy();
     expect(screen.getByText("Claude session continuity may degrade")).toBeTruthy();
+  });
+
+  it("hides empty sections", () => {
+    render(
+      <CheckpointCard
+        summary={{
+          currentUnderstanding: "Summary text.",
+          recommendation: "Continue.",
+          changedSinceLastCheckpoint: [],
+          openRisks: [],
+          decisionsNeeded: []
+        }}
+      />
+    );
+
+    expect(screen.queryByText("Decisions needed")).toBeNull();
+    expect(screen.queryByText("Open risks")).toBeNull();
   });
 
   it("shows degraded banner and filters the marker from risks", () => {

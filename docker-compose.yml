@@ -1,0 +1,38 @@
+services:
+  daemon:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      # Persist database, artifacts, and debug logs
+      - ./data:/app/data
+      # Mount host CLI credentials so claude and codex are authenticated.
+      # These are read-only — the container never writes to them.
+      - ~/.claude:/root/.claude:ro
+      - ~/.claude.json:/root/.claude.json:ro
+      - ~/.codex:/root/.codex:ro
+      - ~/.config/claude-code:/root/.config/claude-code:ro
+    environment:
+      - COUNCIL_ACCESS_TOKEN=${COUNCIL_ACCESS_TOKEN:-local-dev-token}
+      - COUNCIL_DATABASE_PATH=data/council.sqlite
+      # Daemon defaults to 127.0.0.1; inside Docker it must listen on all interfaces
+      # so the nginx container can reach it.
+      - HOST=0.0.0.0
+      # Debug logging is off by default. Set to "1" to log full LLM prompts/responses.
+      # WARNING: logs may contain grounded source code and secrets.
+      - CROSSFIRE_DEBUG=${CROSSFIRE_DEBUG:-0}
+      - CROSSFIRE_DEBUG_DIR=data/debug
+      # Optional: pass API keys directly instead of mounting CLI config.
+      # This avoids token expiry issues with browser-based auth (codex chatgpt mode).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+  web:
+    image: nginx:alpine
+    ports:
+      - "5173:80"
+    volumes:
+      - ./apps/web/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - daemon

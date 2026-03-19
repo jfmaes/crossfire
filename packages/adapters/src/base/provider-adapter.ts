@@ -21,4 +21,6 @@ export interface ProviderAdapter {
   name: "gpt" | "claude";
   sendTurn(input: ProviderTurnInput): AsyncGenerator<NormalizedProviderEvent>;
   healthCheck(): Promise<{ ok: boolean; detail: string }>;
+  /** Clear any cached conversation/thread state for a session (e.g. on restart). */
+  clearSession?(sessionId: string): void;
 }

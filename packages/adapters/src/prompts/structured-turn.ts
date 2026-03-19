@@ -4,6 +4,8 @@ interface StructuredTurnPromptInput {
   peerResponse?: string;
   turnNumber: number;
   totalTurns: number;
+  /** When true, omit the original problem (already in conversation context from a previous turn). */
+  omitContext?: boolean;
 }
 
 export const ANTI_SYCOPHANCY = [
@@ -91,17 +93,31 @@ export function buildStructuredTurnPrompt(
     "- Respond ONLY with a JSON object matching the provided schema.",
     "- Put your full human-readable reasoning (including critique, defense, and evidence) into rawText.",
     "- Write a concise single-paragraph summary in the summary field.",
-    "- disagreements: list SPECIFIC points where you disagree with your peer, with reasoning. Do not leave empty if you have genuine concerns.",
+    hasPeer
+      ? "- disagreements: list SPECIFIC points where you disagree with your peer, with reasoning. Do not leave empty if you have genuine concerns."
+      : "- disagreements: leave as an EMPTY array — there is no peer to disagree with yet. Put concerns and risks in newInsights instead.",
     "- questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification.",
     "- proposedSpecDelta: concrete proposed changes to the evolving specification.",
     "- milestoneReached: set ONLY when a clear phase boundary has been passed (requirements_clarified, architecture_selected, implementation_plan_ready).",
     "- newInsights: genuine new observations, not restatements.",
-    "- assumptions: unstated assumptions you are making or have identified in the problem.",
-    "",
-    "---",
-    "",
-    `ORIGINAL PROBLEM STATEMENT:\n${rich.originalProblem}`
+    "- assumptions: unstated assumptions you are making or have identified in the problem."
   ];
+
+  if (!rich.omitContext) {
+    sections.push(
+      "",
+      "---",
+      "",
+      `ORIGINAL PROBLEM STATEMENT:\n${rich.originalProblem}`
+    );
+  } else {
+    sections.push(
+      "",
+      "---",
+      "",
+      "(The original problem statement is in the conversation context above — do not ask for it again.)"
+    );
+  }
 
   if (rich.peerResponse) {
     sections.push(

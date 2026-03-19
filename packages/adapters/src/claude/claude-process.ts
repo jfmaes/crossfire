@@ -3,8 +3,9 @@ export interface ClaudeProcess {
     sessionId: string;
     prompt: string;
     degraded?: boolean;
+    resumeSessionId?: string;
   }): AsyncGenerator<
-    | { type: "result"; text: string }
+    | { type: "result"; text: string; cliSessionId?: string }
     | { type: "stderr"; text: string }
     | { type: "error"; message: string }
   >;

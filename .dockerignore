@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+coverage
+.git
+.gitignore
+.env
+.env.*
+*.log
+playwright-report
+test-results
+.idea
+.vscode
+docs
+FUTURE_ROADMAP.md

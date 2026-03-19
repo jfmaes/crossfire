@@ -23,17 +23,9 @@ describe("AnalysisCard", () => {
     expect(screen.getByText(result.claudeAnalysis)).toBeTruthy();
   });
 
-  it("renders proposed questions", () => {
+  it("does not render proposed questions", () => {
     render(<AnalysisCard result={result} />);
-    expect(screen.getByText("What is the scope?")).toBeTruthy();
-    expect(screen.getByText("What compliance requirements apply?")).toBeTruthy();
-  });
-
-  it("shows proposed-by attribution", () => {
-    render(<AnalysisCard result={result} />);
-    const sources = document.querySelectorAll(".question-source");
-    const texts = Array.from(sources).map((el) => el.textContent);
-    expect(texts).toContain("Proposed by: gpt");
-    expect(texts).toContain("Proposed by: claude");
+    expect(screen.queryByText("Proposed Interview Questions")).toBeNull();
+    expect(screen.queryByText("What is the scope?")).toBeNull();
   });
 });

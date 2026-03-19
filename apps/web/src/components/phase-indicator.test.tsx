@@ -9,7 +9,7 @@ describe("PhaseIndicator", () => {
 
   it("renders all 4 phases", () => {
     render(<PhaseIndicator currentPhase="analysis" />);
-    expect(screen.getByText("Analysis & Questions")).toBeTruthy();
+    expect(screen.getByText("Analysis")).toBeTruthy();
     expect(screen.getByText("Interview")).toBeTruthy();
     expect(screen.getByText("Approach Debate")).toBeTruthy();
     expect(screen.getByText("Spec Generation")).toBeTruthy();
@@ -23,7 +23,7 @@ describe("PhaseIndicator", () => {
 
   it("marks earlier phases as completed", () => {
     render(<PhaseIndicator currentPhase="interview" />);
-    const analysisStep = screen.getByText("Analysis & Questions").closest("li");
+    const analysisStep = screen.getByText("Analysis").closest("li");
     expect(analysisStep?.className).toContain("completed");
   });
 

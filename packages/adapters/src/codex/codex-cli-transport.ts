@@ -9,7 +9,8 @@ import type { CodexTransport } from "./codex-transport";
 type CodexTransportEvent =
   | { kind: "stderr"; text: string }
   | { kind: "error"; message: string }
-  | { kind: "result"; text: string };
+  | { kind: "result"; text: string }
+  | { kind: "thread_started"; threadId: string };
 
 type SpawnedChild = Pick<ChildProcess, "on"> & {
   stdout: NodeJS.ReadableStream;
@@ -24,12 +25,22 @@ function defaultSpawnProcess(command: string, args: string[]): SpawnedChild {
 }
 
 function parseCodexLine(line: string): CodexTransportEvent[] {
-  const parsed = JSON.parse(line) as {
+  let parsed: {
     type?: string;
+    thread_id?: string;
     message?: string;
     error?: { message?: string };
     item?: { type?: string; text?: string };
   };
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return [];
+  }
+
+  if (parsed.type === "thread.started" && parsed.thread_id) {
+    return [{ kind: "thread_started", threadId: parsed.thread_id }];
+  }
 
   if (parsed.type === "item.completed" && parsed.item?.type === "agent_message" && parsed.item.text) {
     return [{ kind: "result", text: parsed.item.text }];
@@ -65,28 +76,52 @@ export class CodexCliTransport implements CodexTransport {
   private readonly command: string;
   private readonly spawnProcess: (command: string, args: string[]) => SpawnedChild;
   private readonly timeoutMs: number;
+  private readonly fastMode: boolean;
 
   constructor(input: {
     command?: string;
     spawnProcess?: (command: string, args: string[]) => SpawnedChild;
     timeoutMs?: number;
+    fastMode?: boolean;
   } = {}) {
     this.command = input.command ?? "codex";
     this.spawnProcess = input.spawnProcess ?? defaultSpawnProcess;
     this.timeoutMs = input.timeoutMs ?? 300_000;
+    this.fastMode = input.fastMode ?? false;
   }
 
-  async *runTurn(input: { sessionId: string; prompt: string }) {
+  async *runTurn(input: { sessionId: string; prompt: string; resumeThreadId?: string }) {
     const schemaFilePath = await ensureSchemaFilePath();
-    const child = this.spawnProcess(this.command, [
-      "exec",
-      "--json",
-      "--output-schema",
-      schemaFilePath,
-      "--skip-git-repo-check",
-      "--full-auto",
-      input.prompt
-    ]);
+
+    const fastFlags = this.fastMode
+      ? ["-c", 'service_tier="fast"', "--enable", "fast_mode"]
+      : [];
+
+    let args: string[];
+    if (input.resumeThreadId) {
+      args = [
+        "exec", "resume",
+        input.resumeThreadId,
+        "--json",
+        "--output-schema", schemaFilePath,
+        "--skip-git-repo-check",
+        "--full-auto",
+        ...fastFlags,
+        input.prompt
+      ];
+    } else {
+      args = [
+        "exec",
+        "--json",
+        "--output-schema", schemaFilePath,
+        "--skip-git-repo-check",
+        "--full-auto",
+        ...fastFlags,
+        input.prompt
+      ];
+    }
+
+    const child = this.spawnProcess(this.command, args);
 
     const queue: CodexTransportEvent[] = [];
     let closed = false;

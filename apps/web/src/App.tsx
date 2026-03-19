@@ -116,6 +116,9 @@ export function App() {
     setError(null);
     try {
       const payload = await restartSession({ sessionId: id, token });
+      setPreviousSessions((prev) => prev.map((s) =>
+        s.id === id ? { ...s, status: payload.session.status, phase: payload.session.phase } : s
+      ));
       setSessionAndNavigate(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to restart session");
@@ -135,15 +138,18 @@ export function App() {
     }
   }
 
-  async function handleCreate(prompt: string, groundingRoot?: string) {
+  async function handleCreate(prompt: string) {
     setError(null);
     try {
       const payload = await createSession({
         title: prompt.slice(0, 80),
         prompt,
-        token,
-        groundingRoot
+        token
       });
+      setPreviousSessions((prev) => [
+        { id: payload.session.id, title: payload.session.title, status: payload.session.status, phase: payload.session.phase },
+        ...prev
+      ]);
       setSessionAndNavigate(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -191,16 +197,13 @@ export function App() {
       };
     }
 
-    const phaseLabels: Record<string, string> = {
-      analysis: "Starting interview phase...",
-      approach_debate: "Generating specification (GPT drafts, Claude reviews)..."
-    };
-
     return {
       label: "Your response",
       placeholder: "Respond to the checkpoint, provide clarifications, or guide the next round.",
       submitLabel: "Continue session",
-      loadingLabel: phaseLabels[phase ?? ""] ?? "Models reasoning..."
+      loadingLabel: phase === "approach_debate"
+        ? "Generating specification (GPT drafts, Claude reviews)..."
+        : "Models reasoning..."
     };
   }
 
@@ -208,10 +211,8 @@ export function App() {
     if (isFinalized) return "Session complete. The spec has been approved and finalized.";
 
     switch (phase) {
-      case "analysis":
-        return "Both models independently analyzed your problem, then debated which questions to ask you. Below are their analyses and the agreed interview questions.";
       case "interview":
-        return "The models are interviewing you to understand your constraints. Answer each question — your answers directly shape the architecture.";
+        return "Both models analyzed your problem independently. Now they're interviewing you to understand your constraints. Answer each question — your answers directly shape the architecture.";
       case "approach_debate":
         return "Using your interview answers, the models debated the best technical approach until they reached consensus.";
       case "spec_generation":
@@ -226,17 +227,21 @@ export function App() {
     if (session?.session.status === "errored") return "Something went wrong. You can retry the current phase below.";
 
     switch (phase) {
-      case "analysis":
-        return "Review the analyses and questions, then click \"Continue session\" to start the interview.";
       case "interview":
-        return "Answer the question above, or type \"enough\" to skip to the approach debate.";
+        return 'Answer the question above, or type "enough" to skip to the approach debate.';
       case "approach_debate":
-        return "Review the converged approach, then click \"Continue session\" to generate the spec.";
+        return 'Review the converged approach, then click "Continue session" to generate the spec.';
       case "spec_generation":
-        return "Type \"approve\" to finalize, or describe what needs to change for a revision.";
+        return 'Type "approve" to finalize, or describe what needs to change for a revision.';
       default:
         return "";
     }
+  }
+
+  function renderAnalysisCard() {
+    const analysis = session?.analysisResult;
+    if (!analysis) return null;
+    return <AnalysisCard result={analysis} />;
   }
 
   function renderPhaseContent() {
@@ -245,42 +250,15 @@ export function App() {
     const phaseResult = session.phaseResult as Record<string, unknown> | undefined;
 
     switch (phase) {
-      case "analysis":
-        if (phaseResult && "gptAnalysis" in phaseResult) {
-          return (
-            <>
-              <AnalysisCard
-                result={phaseResult as {
-                  gptAnalysis: string;
-                  claudeAnalysis: string;
-                  proposedQuestions: Array<{
-                    text: string;
-                    priority: number;
-                    rationale: string;
-                    proposedBy: string;
-                  }>;
-                }}
-              />
-              {(phaseResult as Record<string, unknown>).debateSummary && (
-                <DebateCard
-                  title="Question Debate"
-                  badge="Agreed questions"
-                  summary={(phaseResult as Record<string, unknown>).debateSummary as string}
-                />
-              )}
-            </>
-          );
-        }
-        return null;
-
       case "interview":
-        if (session.interviewState) {
-          const evaluation = phaseResult && "evaluation" in phaseResult
-            ? (phaseResult.evaluation as string)
-            : null;
-          return <InterviewCard state={session.interviewState} evaluation={evaluation} />;
-        }
-        return null;
+        return (
+          <>
+            {renderAnalysisCard()}
+            {session.interviewState && (
+              <InterviewCard state={session.interviewState} />
+            )}
+          </>
+        );
 
       case "approach_debate":
         if (phaseResult && "convergedApproach" in phaseResult) {
@@ -383,7 +361,7 @@ export function App() {
         return (
           <section className="continue-section">
             <SessionForm
-              key={session!.session.id + session!.session.status + (phase ?? "")}
+              key={session!.session.id + session!.session.status + (phase ?? "") + (session!.interviewState?.answeredCount ?? 0)}
               label={labels.label}
               placeholder={labels.placeholder}
               submitLabel={labels.submitLabel}

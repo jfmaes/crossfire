@@ -26,7 +26,7 @@ export function buildAnalysisPrompt(input: {
     "",
     `Analyze the following problem and produce:`,
     `1. A thorough breakdown of what this problem entails — be specific about what could go wrong`,
-    `2. 3-5 critical questions the human MUST answer before design can begin`,
+    `2. Up to 5 critical questions the human MUST answer before design can begin (fewer is better — only ask what's truly necessary)`,
     `3. For each question, rank its priority (1 = highest) and explain WHY the answer matters`,
     "",
     `Respond ONLY with a JSON object matching this schema:`,

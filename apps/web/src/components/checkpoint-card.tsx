@@ -1,4 +1,5 @@
 import { checkpointSummarySchema } from "@council/core";
+import { MarkdownContent } from "./markdown-content";
 import type { z } from "zod";
 
 type CheckpointSummary = z.infer<typeof checkpointSummarySchema>;
@@ -22,25 +23,27 @@ export function CheckpointCard({ summary }: { summary: CheckpointSummary }) {
         </div>
       )}
 
-      <p>{summary.currentUnderstanding}</p>
+      <MarkdownContent text={summary.currentUnderstanding} />
 
-      <div className="checkpoint-section">
-        <h3>Decisions needed</h3>
-        <ul>
-          {summary.decisionsNeeded.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      </div>
+      {summary.decisionsNeeded.length > 0 && (
+        <div className="checkpoint-section">
+          <h3>Decisions needed</h3>
+          <ul>
+            {summary.decisionsNeeded.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-      <div className="checkpoint-section">
-        <h3>Open risks</h3>
-        <ul className="risk-list">
-          {displayRisks.length > 0
-            ? displayRisks.map((item) => <li key={item}>{item}</li>)
-            : <li>No explicit disagreements yet</li>}
-        </ul>
-      </div>
+      {displayRisks.length > 0 && (
+        <div className="checkpoint-section">
+          <h3>Open risks</h3>
+          <ul className="risk-list">
+            {displayRisks.map((item) => <li key={item}>{item}</li>)}
+          </ul>
+        </div>
+      )}
     </article>
   );
 }

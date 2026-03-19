@@ -62,6 +62,7 @@ function migrateIfNeeded(db: Database.Database) {
 
 export function createInMemoryDatabase(): Database.Database {
   const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
   applySchema(db);
   return db;
 }
@@ -69,6 +70,8 @@ export function createInMemoryDatabase(): Database.Database {
 export function createDatabase(filePath: string): Database.Database {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const db = new Database(filePath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
   applySchema(db);
   return db;
 }

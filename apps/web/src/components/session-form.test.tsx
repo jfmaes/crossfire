@@ -16,7 +16,7 @@ describe("SessionForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
-      expect(onCreate).toHaveBeenCalledWith("Help me design a dual-model spec app", undefined);
+      expect(onCreate).toHaveBeenCalledWith("Help me design a dual-model spec app");
     });
   });
 });

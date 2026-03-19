@@ -211,6 +211,13 @@ export class SessionRepository {
       .run(sessionId);
   }
 
+  recoverStaleDebatingSessions(): number {
+    const result = this.db
+      .prepare("UPDATE sessions SET status = 'errored' WHERE status = 'debating'")
+      .run();
+    return result.changes;
+  }
+
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM interview_questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM phase_results WHERE session_id = ?").run(id);

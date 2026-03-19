@@ -10,7 +10,7 @@ interface HealthCheckProvider {
 }
 
 interface SessionService {
-  createSession(input: { title: string; prompt: string; groundingRoot?: string }): Promise<Record<string, unknown>>;
+  createSession(input: { title: string; prompt: string }): Promise<Record<string, unknown>>;
   continueSession(input: { id: string; humanResponse: string }): Promise<Record<string, unknown> | null>;
   restartSession(id: string): Promise<Record<string, unknown> | null>;
   deleteSession(id: string): void;
@@ -75,7 +75,8 @@ export function buildServer(input: {
       reply.header("content-type", "text/markdown; charset=utf-8");
       reply.header("content-disposition", `attachment; filename="${fileName}"`);
       return reply.send(content);
-    } catch {
+    } catch (error) {
+      request.log.error(error, "artifact read failed");
       return reply.code(404).send({ error: "artifact not found" });
     }
   });

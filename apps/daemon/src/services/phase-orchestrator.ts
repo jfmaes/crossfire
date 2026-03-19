@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { InterviewQuestion } from "@council/core";
 import type { ProviderAdapter } from "@council/adapters";
 import {
   buildAnalysisPrompt,
@@ -42,6 +41,7 @@ interface InterviewStepResult {
 interface ApproachDebateResult {
   convergedApproach: string;
   turns: Array<{ actor: string; summary: string }>;
+  questionsForHuman: string[];
 }
 
 interface SpecGenerationResult {
@@ -194,73 +194,33 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       claudeAnalysis: string,
       questions: Array<ProposedQuestion & { proposedBy: string }>
     ): Promise<QuestionDebateResult> {
-      const maxTurns = 14;
-      emitProgress({ sessionId, type: "phase_start", phase: "analysis_debate", message: `Question Debate (${questions.length} proposed questions — debating to consensus, up to ${maxTurns} turns)` });
+      // Single parallel synthesis instead of multi-turn debate.
+      // Both models independently review the proposed questions and produce
+      // their preferred list. We merge the results. This replaces the old
+      // 4-6 turn sequential debate (~350s) with a single parallel call (~60-170s).
+      emitProgress({ sessionId, type: "phase_start", phase: "analysis_debate", message: `Question Synthesis (${questions.length} proposed — both models filter in parallel)` });
 
-      const providers = [input.gpt, input.claude];
-      const turnResults: Array<{ model: string; rawText: string; parsed: Record<string, unknown> | null }> = [];
-      let peerResponse: string | undefined;
+      const synthesisPrompt = (role: "gpt" | "claude") => buildQuestionDebatePrompt({
+        role,
+        originalProblem: prompt,
+        gptAnalysis,
+        claudeAnalysis,
+        allQuestions: questions,
+        turnNumber: 1,
+        totalTurns: 1
+      });
 
-      for (let i = 0; i < maxTurns; i++) {
-        const provider = providers[i % 2];
-        const model = provider.name as "gpt" | "claude";
-        const turnNumber = i + 1;
+      const [gptResult, claudeResult] = await Promise.all([
+        collectTurnOutput(input.gpt, { sessionId, prompt: synthesisPrompt("gpt"), phase: "analysis_debate" }),
+        collectTurnOutput(input.claude, { sessionId, prompt: synthesisPrompt("claude"), phase: "analysis_debate" })
+      ]);
 
-        const turnPrompt = buildQuestionDebatePrompt({
-          role: model,
-          originalProblem: prompt,
-          gptAnalysis,
-          claudeAnalysis,
-          allQuestions: questions,
-          peerResponse,
-          turnNumber,
-          totalTurns: maxTurns
-        });
-
-        const result = await collectTurnOutput(provider, {
-          sessionId,
-          prompt: turnPrompt,
-          phase: "analysis_debate"
-        });
-
-        turnResults.push({ model, rawText: result.rawText, parsed: result.parsed });
-
-        // Log disagreement count (always visible, not just debug mode)
-        const disagreements = Array.isArray(result.parsed?.disagreements)
-          ? (result.parsed!.disagreements as string[]) : [];
-        const questionCount = Array.isArray(result.parsed?.synthesizedQuestions)
-          ? (result.parsed!.synthesizedQuestions as unknown[]).length : 0;
-        emitProgress({
-          sessionId, type: "info",
-          message: `Turn ${turnNumber} (${model.toUpperCase()}): ${disagreements.length} disagreements${questionCount > 0 ? `, ${questionCount} questions proposed` : ""}`
-        });
-
-        // Use rawText as peer response for next turn
-        peerResponse = result.rawText;
-
-        // Check for consensus: both latest turns have zero disagreements
-        // Require at least 4 turns (2 full exchanges) before consensus
-        if (turnResults.length >= 4) {
-          const latest = result.parsed;
-          const previous = turnResults[turnResults.length - 2]?.parsed;
-          const latestDisagreements = Array.isArray(latest?.disagreements)
-            ? (latest!.disagreements as string[]).length : 0;
-          const previousDisagreements = Array.isArray(previous?.disagreements)
-            ? (previous!.disagreements as string[]).length : 0;
-
-          if (latestDisagreements === 0 && previousDisagreements === 0) {
-            emitProgress({ sessionId, type: "consensus", message: `Question consensus reached after ${turnNumber} turns` });
-            break;
-          }
-        }
-      }
-
-      // Extract synthesized questions: try last turn, then earlier turns
+      // Extract synthesized questions from both, prefer Claude's if both produced them
       let synthesized: Array<ProposedQuestion & { id: string; proposedBy: "synthesized" }> = [];
 
-      for (let i = turnResults.length - 1; i >= 0 && synthesized.length === 0; i--) {
-        const parsed = turnResults[i].parsed;
-        const qs = extractSynthesizedQuestions(parsed);
+      for (const result of [claudeResult, gptResult]) {
+        if (synthesized.length > 0) break;
+        const qs = extractSynthesizedQuestions(result.parsed);
         if (qs.length > 0) {
           synthesized = qs
             .sort((a, b) => a.priority - b.priority)
@@ -268,7 +228,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         }
       }
 
-      // Last resort: fall back to original proposed questions
+      // Fall back to original proposed questions (deduplicated)
       if (synthesized.length === 0) {
         synthesized = questions.map((q) => ({
           ...q,
@@ -277,15 +237,16 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         }));
       }
 
-      const debateTurns = turnResults.map((t) => {
-        const summary = (t.parsed?.summary as string) || t.rawText.slice(0, 200);
-        return `${t.model.toUpperCase()}: ${summary}`;
-      });
+      const gptSummary = (gptResult.parsed?.summary as string) || gptResult.rawText.slice(0, 200);
+      const claudeSummary = (claudeResult.parsed?.summary as string) || claudeResult.rawText.slice(0, 200);
       const debateSummary = [
-        `Question debate: ${turnResults.length} turns`,
+        "Question synthesis (parallel):",
         "",
-        ...debateTurns
+        `GPT: ${gptSummary}`,
+        `Claude: ${claudeSummary}`
       ].join("\n");
+
+      emitProgress({ sessionId, type: "consensus", message: `Question synthesis complete — ${synthesized.length} questions selected` });
 
       return { synthesizedQuestions: synthesized, debateSummary };
     },
@@ -375,7 +336,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         ? `${lastTurn.rawText}\n\nProposed spec delta:\n${lastTurn.proposedSpecDelta}`
         : "No converged approach";
 
-      return { convergedApproach, turns };
+      // Surface any questions the models have for the human (debate paused for clarification)
+      const questionsForHuman = lastTurn?.questionsForHuman ?? [];
+
+      return { convergedApproach, turns, questionsForHuman };
     },
 
     async runSpecGeneration(
@@ -384,8 +348,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       interviewResults: Array<{ question: string; answer: string }>,
       approachResult: string
     ): Promise<SpecGenerationResult> {
+      // GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
+      // This is the core adversarial value: the reviewer catches what the drafter missed.
       emitProgress({ sessionId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews)" });
-      // GPT drafts spec
+
       const draftPrompt = buildSpecPrompt({
         role: "gpt",
         originalProblem: prompt,
@@ -407,7 +373,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const draftPlan = (draftResult.parsed?.implementationPlan as string) || "";
 
-      // Claude reviews and finalizes both documents
+      // Claude reviews GPT's draft — the adversarial step
       const peerDraft = draftPlan
         ? `${draftSpec}\n\n---\n\nIMPLEMENTATION PLAN:\n${draftPlan}`
         : draftSpec;
@@ -432,7 +398,6 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         reviewResult.rawText ||
         draftSpec;
 
-      // Extract implementation plan — try review first, fall back to draft
       const implementationPlan =
         (reviewResult.parsed?.implementationPlan as string) ||
         (draftResult.parsed?.implementationPlan as string) ||
