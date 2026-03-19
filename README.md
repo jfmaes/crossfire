@@ -6,6 +6,8 @@ Crossfire orchestrates Claude and GPT through a structured multi-phase process t
 
 > **Local-only by design.** Crossfire is built for single-user, localhost deployment. It has not been hardened for multi-user, public-internet, or shared-server use. See [Security considerations](#security-considerations) below for details on what would need to change before exposing it beyond your own machine.
 
+> **Blog post:** [Crossfire: When One LLM Isn't Enough](https://jfmaes.me/blog/crossfire-when-one-llm-isnt-enough/) — the motivation, architecture, and lessons learned building this.
+
 ## How it works
 
 1. You describe what you want to build
