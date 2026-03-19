@@ -1,0 +1,23 @@
+{
+  "name": "the-council",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "build": "pnpm --filter @council/daemon build && pnpm --filter @council/web build",
+    "dev:web": "pnpm --filter @council/web dev",
+    "dev:daemon": "pnpm --filter @council/daemon dev",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

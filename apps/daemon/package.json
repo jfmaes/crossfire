@@ -1,0 +1,21 @@
+{
+  "name": "@council/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@council/adapters": "workspace:*",
+    "@council/core": "workspace:*",
+    "@council/storage": "workspace:*",
+    "fastify": "^5.6.1",
+    "fastify-plugin": "^5.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  }
+}

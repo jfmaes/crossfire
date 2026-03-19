@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "rawText": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "newInsights": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "disagreements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "questionsForPeer": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "questionsForHuman": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proposedSpecDelta": {
+      "type": "string"
+    },
+    "milestoneReached": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "requirements_clarified",
+            "architecture_selected",
+            "implementation_plan_ready"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "rawText",
+    "summary",
+    "newInsights",
+    "assumptions",
+    "disagreements",
+    "questionsForPeer",
+    "questionsForHuman",
+    "proposedSpecDelta",
+    "milestoneReached"
+  ],
+  "additionalProperties": false
+}

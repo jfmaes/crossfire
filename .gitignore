@@ -1,0 +1,20 @@
+node_modules
+dist
+coverage
+.DS_Store
+*.log
+
+# Runtime data
+data/
+
+# Test artifacts
+playwright-report
+test-results
+
+# Editor / OS
+.idea
+.vscode
+*.swp
+*.swo
+*~
+Thumbs.db
