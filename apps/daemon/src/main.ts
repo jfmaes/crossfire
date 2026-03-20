@@ -6,8 +6,7 @@ import { enableDebugLogging } from "./services/debug-log";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
-import { randomUUID } from "node:crypto";
-const accessToken = process.env.COUNCIL_ACCESS_TOKEN || randomUUID();
+const accessToken = process.env.COUNCIL_ACCESS_TOKEN || "local-dev-token";
 const providerMode = process.env.COUNCIL_PROVIDER_MODE ?? "real";
 const databasePath = process.env.COUNCIL_DATABASE_PATH ?? "data/council.sqlite";
 const groundingRoot = process.env.COUNCIL_GROUNDING_ROOT;
@@ -65,6 +64,6 @@ const address = await app.listen({ port, host });
 
 console.log(`Crossfire daemon listening on ${address} (${providerMode} providers${codexFastMode ? ", codex fast mode" : ""})`);
 if (!process.env.COUNCIL_ACCESS_TOKEN) {
-  console.log(`  Generated access token: ${accessToken}`);
-  console.log(`  Set COUNCIL_ACCESS_TOKEN in your environment to use a fixed token.`);
+  console.log(`  Using default access token: ${accessToken}`);
+  console.log(`  Set COUNCIL_ACCESS_TOKEN in your environment to use a custom token.`);
 }
