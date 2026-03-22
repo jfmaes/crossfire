@@ -258,4 +258,17 @@ export class SessionRepository {
       `)
       .get(sessionId, phase) as PhaseResultRow | undefined;
   }
+
+  findAllPhaseResults(sessionId: string): PhaseResultRow[] {
+    return this.db
+      .prepare(`
+        SELECT
+          session_id as sessionId,
+          phase,
+          result_json as resultJson
+        FROM phase_results
+        WHERE session_id = ?
+      `)
+      .all(sessionId) as PhaseResultRow[];
+  }
 }

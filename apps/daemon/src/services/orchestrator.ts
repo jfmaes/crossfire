@@ -31,8 +31,10 @@ function hasReachedConsensus(turns: ModelTurn[]): boolean {
   const latest = turns.at(-1);
   if (!latest) return false;
 
-  // Milestone reached = explicit convergence signal (still requires 2+ turns)
-  if (latest.milestoneReached && turns.length >= 2) return true;
+  // Milestone reached = explicit convergence signal, but only if the model
+  // also cleared its disagreements. Otherwise it declared a milestone while
+  // still holding unresolved objections — that's not real consensus.
+  if (latest.milestoneReached && turns.length >= 2 && latest.disagreements.length === 0) return true;
 
   // Need at least 4 turns (2 full exchanges) to assess genuine consensus.
   // The first turn always has empty disagreements because there's no peer yet,

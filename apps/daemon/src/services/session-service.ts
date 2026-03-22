@@ -294,6 +294,39 @@ export function createSessionService(input: SessionServiceInput) {
       };
     },
 
+    exportSession(id: string) {
+      const session = input.repository.findById(id);
+      if (!session) return null;
+
+      const summary = input.repository.findSummaryBySessionId(id);
+      const interviewQuestions = input.repository.findInterviewQuestions(id);
+      const phaseResults = input.repository.findAllPhaseResults(id);
+
+      const phases: Record<string, unknown> = {};
+      for (const row of phaseResults) {
+        try {
+          phases[row.phase] = JSON.parse(row.resultJson);
+        } catch {
+          phases[row.phase] = row.resultJson;
+        }
+      }
+
+      return {
+        exportedAt: new Date().toISOString(),
+        session,
+        summary: summary ?? null,
+        interviewQuestions: interviewQuestions.map((q) => ({
+          id: q.id,
+          text: q.text,
+          priority: q.priority,
+          rationale: q.rationale,
+          proposedBy: q.proposedBy,
+          answer: q.answer
+        })),
+        phaseResults: phases
+      };
+    },
+
     async restartSession(id: string) {
       const session = input.repository.findById(id);
       if (!session) return null;
@@ -596,7 +629,7 @@ export function createSessionService(input: SessionServiceInput) {
       }
 
       case "approach_debate": {
-        return advanceToSpecGeneration(id, originalPrompt);
+        return advanceToSpecGeneration(id, originalPrompt, humanResponse);
       }
 
       case "spec_generation": {
@@ -752,7 +785,7 @@ export function createSessionService(input: SessionServiceInput) {
 
     input.repository.updateStatus({ id, status: hasHumanQuestions ? "waiting_for_human" : "checkpoint" });
     const summary = {
-      currentUnderstanding: approachResult.convergedApproach.slice(0, 1000),
+      currentUnderstanding: approachResult.convergedApproach,
       recommendation: hasHumanQuestions
         ? "The models need clarification before they can converge."
         : "Review the converged approach before spec generation",
@@ -772,7 +805,7 @@ export function createSessionService(input: SessionServiceInput) {
     };
   }
 
-  async function advanceToSpecGeneration(id: string, originalPrompt: string) {
+  async function advanceToSpecGeneration(id: string, originalPrompt: string, humanFeedback?: string) {
     input.repository.updatePhase({ id, phase: "spec_generation" });
     input.repository.updateStatus({ id, status: "debating" });
 
@@ -783,7 +816,11 @@ export function createSessionService(input: SessionServiceInput) {
 
     const approachRow = input.repository.findPhaseResult(id, "approach_debate");
     const approachData = approachRow ? JSON.parse(approachRow.resultJson) : null;
-    const approachResult = approachData?.convergedApproach || "";
+    let approachResult = approachData?.convergedApproach || "";
+
+    if (humanFeedback && humanFeedback.trim()) {
+      approachResult += `\n\n---\n\nHUMAN FEEDBACK ON APPROACH:\n${humanFeedback}`;
+    }
 
     let specResult;
     try {

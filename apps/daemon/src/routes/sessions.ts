@@ -8,6 +8,7 @@ interface SessionService {
   deleteSession(id: string): void;
   listSessions(): Array<{ id: string; title: string; status: string; phase?: string | null }>;
   getSession(id: string): Promise<Record<string, unknown> | null>;
+  exportSession(id: string): Record<string, unknown> | null;
 }
 
 export async function registerSessionRoutes(
@@ -129,5 +130,25 @@ export async function registerSessionRoutes(
     }
 
     return reply.code(200).send(found);
+  });
+
+  app.get("/sessions/:id/export", async (request, reply) => {
+    if (!input.sessionService) {
+      return reply.code(503).send({ error: "session service unavailable" });
+    }
+
+    const params = request.params as { id: string };
+    const data = input.sessionService.exportSession(params.id);
+
+    if (!data) {
+      return reply.code(404).send({ error: "not found" });
+    }
+
+    const fileName = `crossfire-session-${params.id.slice(0, 8)}.json`;
+    return reply
+      .code(200)
+      .header("content-type", "application/json")
+      .header("content-disposition", `attachment; filename="${fileName}"`)
+      .send(data);
   });
 }

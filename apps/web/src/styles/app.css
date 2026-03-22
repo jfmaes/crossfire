@@ -718,8 +718,6 @@ body {
 
 .debate-summary {
   margin-bottom: 16px;
-  max-height: 400px;
-  overflow-y: auto;
 }
 
 .debate-turns {
@@ -756,23 +754,265 @@ body {
 .debate-turn--gpt .debate-turn__actor { color: var(--gpt-color); }
 .debate-turn--claude .debate-turn__actor { color: var(--claude-color); }
 
-.debate-converged {
-  margin-top: 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-}
-
-.debate-converged > summary {
-  cursor: pointer;
-  font-size: 0.82rem;
-  font-weight: 600;
+.debate-converged-inline {
+  font-size: 0.84rem;
+  line-height: 1.65;
   color: var(--ink-secondary);
 }
 
-.debate-converged-text {
+.debate-pretext {
+  margin-bottom: 16px;
+}
+
+/* ── Debate turn header ── */
+
+.debate-turn__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.debate-turn__disagreements {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-btn);
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.debate-turn__disagreements--zero {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.debate-turn__disagreement-list {
+  margin: 8px 0 0;
+  padding: 0 0 0 16px;
+  list-style: none;
+}
+
+.debate-turn__disagreement-list li {
+  position: relative;
+  padding: 3px 0 3px 12px;
+  font-size: 0.78rem;
+  color: var(--danger);
+  opacity: 0.85;
+}
+
+.debate-turn__disagreement-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--danger);
+  opacity: 0.6;
+}
+
+/* ── Disagreement timeline ── */
+
+.disagreement-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.disagreement-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-radius: var(--radius-input);
+  border-left: 3px solid var(--border);
+}
+
+.disagreement-item--resolved {
+  border-left-color: var(--success);
+  background: rgba(74, 222, 128, 0.04);
+}
+
+.disagreement-item--open {
+  border-left-color: var(--danger);
+  background: rgba(248, 113, 113, 0.04);
+}
+
+.disagreement-item__status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: var(--radius-btn);
+  flex-shrink: 0;
+}
+
+.disagreement-item--resolved .disagreement-item__status {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.disagreement-item--open .disagreement-item__status {
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.disagreement-item__text {
+  flex: 1;
+  font-size: 0.82rem;
+  color: var(--ink-secondary);
+  min-width: 200px;
+}
+
+.disagreement-item__meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+  width: 100%;
+}
+
+/* ── Challenge cards ── */
+
+.challenge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.challenge-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-input);
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.challenge-card__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.challenge-card__number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.challenge-card__title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.challenge-card__analysis {
+  font-size: 0.84rem;
+  color: var(--ink-secondary);
+  line-height: 1.6;
+}
+
+.challenge-card__fix {
   margin-top: 12px;
-  max-height: 500px;
-  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: var(--radius-input);
+  background: rgba(74, 222, 128, 0.06);
+  border: 1px solid rgba(74, 222, 128, 0.12);
+}
+
+.challenge-card__fix-label {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--success);
+  margin-bottom: 6px;
+}
+
+.challenge-card__feedback {
+  margin-top: 10px;
+}
+
+.challenge-card__feedback-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 0.82rem;
+  background: var(--bg-surface);
+  color: var(--ink);
+  resize: vertical;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.challenge-card__feedback-input::placeholder {
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+.challenge-card__feedback-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.challenge-card__feedback-input--general {
+  min-height: 60px;
+}
+
+/* ── Challenge feedback submit ── */
+
+.challenge-feedback-submit {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.challenge-feedback-submit__btn {
+  width: fit-content;
+  border: none;
+  border-radius: var(--radius-btn);
+  padding: 10px 24px;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: white;
+  background: var(--accent);
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition);
+}
+
+.challenge-feedback-submit__btn:hover:not(:disabled) {
+  background: var(--accent-dark);
+  transform: translateY(-1px);
+}
+
+.challenge-feedback-submit__btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.challenge-feedback-submit__btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* ── Interview card ── */
@@ -1268,6 +1508,15 @@ body {
 .session-actions__btn--restart:hover {
   background: var(--accent-light);
   border-color: var(--accent);
+}
+
+.session-actions__btn--export {
+  color: var(--gpt-color);
+}
+
+.session-actions__btn--export:hover {
+  background: var(--gpt-bg);
+  border-color: var(--gpt-color);
 }
 
 .session-actions__btn--new {

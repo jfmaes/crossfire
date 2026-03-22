@@ -184,6 +184,36 @@ export async function deleteSession(input: {
   }
 }
 
+export async function exportSession(input: {
+  sessionId: string;
+  token: string;
+  baseUrl?: string;
+}) {
+  const response = await fetch(`${input.baseUrl ?? ""}/sessions/${input.sessionId}/export`, {
+    headers: {
+      "x-council-token": input.token
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to export session: ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition");
+  const fileNameMatch = disposition?.match(/filename="(.+)"/);
+  const fileName = fileNameMatch?.[1] ?? `crossfire-session-${input.sessionId.slice(0, 8)}.json`;
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export async function getHealth(baseUrl = "") {
   const response = await fetch(`${baseUrl}/health`, {
     headers: {

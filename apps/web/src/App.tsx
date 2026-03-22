@@ -14,6 +14,7 @@ import {
   continueSession,
   restartSession,
   deleteSession,
+  exportSession,
   getHealth,
   getSession,
   listSessions,
@@ -33,6 +34,7 @@ export function App() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [previousSessions, setPreviousSessions] = useState<SessionListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [debateFeedbackLoading, setDebateFeedbackLoading] = useState(false);
 
   const token = localStorage.getItem("council-token") ?? "local-dev-token";
 
@@ -262,13 +264,24 @@ export function App() {
 
       case "approach_debate":
         if (phaseResult && "convergedApproach" in phaseResult) {
+          const isCheckpoint = session.session.status === "checkpoint" || session.session.status === "waiting_for_human";
           return (
             <DebateCard
               title="Approach Debate"
               badge="Phase 3"
               summary={session.summary.currentUnderstanding}
-              turns={(phaseResult.turns as Array<{ actor: string; summary: string }>) || []}
+              turns={(phaseResult.turns as Array<{ actor: string; summary: string; disagreements?: string[]; rawText?: string }>) || []}
               convergedApproach={phaseResult.convergedApproach as string}
+              canSubmitFeedback={isCheckpoint}
+              feedbackLoading={debateFeedbackLoading}
+              onSubmitFeedback={isCheckpoint ? async (feedback: string) => {
+                setDebateFeedbackLoading(true);
+                try {
+                  await handleContinue(feedback);
+                } finally {
+                  setDebateFeedbackLoading(false);
+                }
+              } : undefined}
             />
           );
         }
@@ -356,7 +369,7 @@ export function App() {
         <CheckpointCard summary={session.summary} />
       )}
 
-      {canContinue && (() => {
+      {canContinue && phase !== "approach_debate" && (() => {
         const labels = getContinueLabel();
         return (
           <section className="continue-section">
@@ -380,6 +393,16 @@ export function App() {
 
       {session && (
         <div className="session-actions">
+          <button
+            className="session-actions__btn session-actions__btn--export"
+            onClick={() => {
+              exportSession({ sessionId: session.session.id, token }).catch((err) => {
+                setError(err instanceof Error ? err.message : "Failed to export session");
+              });
+            }}
+          >
+            Export session data
+          </button>
           <button
             className="session-actions__btn session-actions__btn--restart"
             onClick={() => handleRestartSession(session.session.id)}

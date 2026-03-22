@@ -115,7 +115,7 @@ export class CodexCliTransport implements CodexTransport {
         "--json",
         "--output-schema", schemaFilePath,
         "--skip-git-repo-check",
-        "--full-auto",
+        "--yolo",
         ...fastFlags,
         input.prompt
       ];
