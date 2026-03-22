@@ -127,7 +127,7 @@ Each log file includes the session ID, phase, model, elapsed time, and the full 
 
 ## Session reuse for performance
 
-Both CLI adapters reuse conversation sessions across all phases. The analysis phase establishes the session; every subsequent phase resumes it via `--resume` (Claude) or `exec resume` (Codex). The original problem context is only sent once -- later phases benefit from the model's conversation cache, significantly reducing per-turn inference time.
+Both CLI adapters reuse conversation state selectively, not globally across every phase. Multi-turn debate flows resume within the same conversational context, but phase boundaries start fresh prompts because the prompt contract changes substantially between analysis, interview, and spec generation. Reusing one conversation across those boundaries can produce empty or malformed outputs instead of a valid structured turn.
 
 **Note:** Inference latency is still a real bottleneck. Each CLI invocation spawns a fresh OS process, and model reasoning time for complex problems can exceed 2-3 minutes per turn. Session reuse mitigates redundant context processing but does not eliminate the fundamental inference cost. For large prompts with grounding context (40k+ chars), expect the initial analysis phase to take several minutes.
 

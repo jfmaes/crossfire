@@ -88,12 +88,18 @@ async function collectTurnOutput(
 
   let rawText = "";
   let parsed: Record<string, unknown> | null = null;
+  let providerError: string | null = null;
 
   for await (const event of provider.sendTurn({
     sessionId: input.sessionId,
     prompt: input.prompt,
     phase: input.phase
   })) {
+    if (event.type === "error") {
+      providerError = event.message;
+      continue;
+    }
+
     if (event.type === "structured_turn") {
       rawText = event.turn.rawText || event.turn.summary;
       parsed = {
@@ -135,6 +141,30 @@ async function collectTurnOutput(
   const elapsedMs = Date.now() - startTime;
   const elapsed = (elapsedMs / 1000).toFixed(1);
   const chars = rawText.length;
+
+  if (providerError || (!parsed && chars === 0)) {
+    const errorMessage = providerError ?? `${model.toUpperCase()} returned no output`;
+    emitProgress({
+      sessionId: input.sessionId,
+      type: "info",
+      model,
+      phase: input.phase,
+      elapsedMs,
+      message: `Failed in ${elapsed}s — ${errorMessage}`
+    });
+
+    debugLogResponse({
+      sessionId: input.sessionId,
+      phase: input.phase,
+      model,
+      rawText,
+      parsed: { error: errorMessage },
+      elapsedMs
+    });
+
+    throw new Error(`${model.toUpperCase()} ${input.phase} failed: ${errorMessage}`);
+  }
+
   const degraded = parsed?.degraded ? " (degraded)" : "";
   emitProgress({
     sessionId: input.sessionId, type: "model_done", model,
@@ -328,7 +358,9 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const turns = round.state.turns.map((t) => ({
         actor: t.actor,
-        summary: t.summary
+        summary: t.summary,
+        disagreements: t.disagreements,
+        rawText: t.rawText
       }));
 
       const lastTurn = round.state.turns.at(-1);

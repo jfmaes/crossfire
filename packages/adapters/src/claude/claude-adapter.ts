@@ -7,9 +7,16 @@ export class ClaudeAdapter implements ProviderAdapter {
   readonly name = "claude";
 
   /**
-   * Tracks CLI session IDs for conversation resumption across all phases.
-   * Key: Crossfire sessionId, Value: Claude CLI session_id.
-   * Analysis phase always starts fresh; all subsequent phases/debates resume.
+   * Tracks Claude CLI session IDs for conversation resumption within a single
+   * phase context.
+   *
+   * Key: "sessionId:phaseKey", Value: Claude CLI session_id.
+   *
+   * Reusing one Claude conversation across different prompt shapes causes
+   * phase bleed, especially on spec generation where Claude can stall and
+   * return no output. Starting fresh on phase boundaries keeps the prompt
+   * contract stable while still allowing reuse within repeated turns of the
+   * same phase.
    */
   private readonly cliSessions = new Map<string, string>();
 
@@ -18,11 +25,10 @@ export class ClaudeAdapter implements ProviderAdapter {
   async *sendTurn(input: ProviderTurnInput) {
     yield { type: "status", value: "started" } as const;
 
-    // Analysis is always the entry point — start a fresh conversation.
-    // All subsequent phases resume the same conversation, so the model
-    // already has the original problem, analysis results, debate context, etc.
-    const isAnalysis = input.phase === "analysis";
-    const resumeSessionId = isAnalysis ? undefined : this.cliSessions.get(input.sessionId);
+    const phaseKey = input.phase ?? "debate";
+    const sessionKey = `${input.sessionId}:${phaseKey}`;
+    const isAnalysis = phaseKey === "analysis";
+    const resumeSessionId = isAnalysis ? undefined : this.cliSessions.get(sessionKey);
     const canOmitContext = !!resumeSessionId;
 
     const prompt = input.phase
@@ -53,7 +59,7 @@ export class ClaudeAdapter implements ProviderAdapter {
 
       // Capture CLI session ID for future resumption
       if (event.cliSessionId) {
-        this.cliSessions.set(input.sessionId, event.cliSessionId);
+        this.cliSessions.set(sessionKey, event.cliSessionId);
       }
 
       yield {
@@ -67,7 +73,12 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   clearSession(sessionId: string) {
-    this.cliSessions.delete(sessionId);
+    const prefix = `${sessionId}:`;
+    for (const key of this.cliSessions.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cliSessions.delete(key);
+      }
+    }
   }
 
   healthCheck() {

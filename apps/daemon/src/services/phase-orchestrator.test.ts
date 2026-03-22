@@ -29,6 +29,31 @@ function createAnalysisProvider(name: "gpt" | "claude"): ProviderAdapter {
   };
 }
 
+function createFailingProvider(name: "gpt" | "claude", message: string): ProviderAdapter {
+  return {
+    name,
+    async *sendTurn(_input: ProviderTurnInput) {
+      yield { type: "error", message } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+}
+
+function createSilentProvider(name: "gpt" | "claude"): ProviderAdapter {
+  return {
+    name,
+    async *sendTurn(_input: ProviderTurnInput) {
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+}
+
 describe("createPhaseOrchestrator", () => {
   describe("runDualAnalysis", () => {
     it("runs GPT and Claude in parallel and collects proposed questions", async () => {
@@ -127,6 +152,38 @@ describe("createPhaseOrchestrator", () => {
 
       expect(result.spec).toBeTruthy();
       expect(result.summary).toBeTruthy();
+    });
+
+    it("throws when a provider reports an error instead of masking it as empty output", async () => {
+      const orchestrator = createPhaseOrchestrator({
+        gpt: createAnalysisProvider("gpt"),
+        claude: createFailingProvider("claude", "Claude process timed out")
+      });
+
+      await expect(
+        orchestrator.runSpecGeneration(
+          "s1",
+          "Design a task manager",
+          [{ question: "Scope?", answer: "Web only" }],
+          "Use React + Node"
+        )
+      ).rejects.toThrow("CLAUDE spec_generation failed: Claude process timed out");
+    });
+
+    it("throws when a provider finishes without emitting any output", async () => {
+      const orchestrator = createPhaseOrchestrator({
+        gpt: createAnalysisProvider("gpt"),
+        claude: createSilentProvider("claude")
+      });
+
+      await expect(
+        orchestrator.runSpecGeneration(
+          "s1",
+          "Design a task manager",
+          [{ question: "Scope?", answer: "Web only" }],
+          "Use React + Node"
+        )
+      ).rejects.toThrow("CLAUDE spec_generation failed: CLAUDE returned no output");
     });
   });
 });
