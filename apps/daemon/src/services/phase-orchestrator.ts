@@ -4,9 +4,10 @@ import {
   buildAnalysisPrompt,
   buildQuestionDebatePrompt,
   buildInterviewFollowUpPrompt,
-  buildSpecPrompt
+  buildSpecPrompt,
+  buildWalkthroughPrompt
 } from "@council/adapters";
-import { emitProgress } from "./progress";
+import { emitProgress, summarizeProgressText } from "./progress";
 import { createOrchestrator } from "./orchestrator";
 import { debugLogPrompt, debugLogResponse } from "./debug-log";
 
@@ -44,10 +45,17 @@ interface ApproachDebateResult {
   questionsForHuman: string[];
 }
 
+interface WalkthroughGap {
+  location: string;
+  issue: string;
+  fix: string;
+}
+
 interface SpecGenerationResult {
   spec: string;
   implementationPlan: string;
   summary: string;
+  walkthroughGaps?: WalkthroughGap[];
 }
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
@@ -70,12 +78,12 @@ function extractJsonFromText(text: string): Record<string, unknown> | null {
 
 async function collectTurnOutput(
   provider: ProviderAdapter,
-  input: { sessionId: string; prompt: string; phase: string }
+  input: { sessionId: string; runId?: string; prompt: string; phase: string }
 ): Promise<{ rawText: string; parsed: Record<string, unknown> | null }> {
   const model = provider.name as "gpt" | "claude";
   const startTime = Date.now();
   emitProgress({
-    sessionId: input.sessionId, type: "model_start", model,
+    sessionId: input.sessionId, runId: input.runId, type: "model_start", model,
     phase: input.phase, message: `Sending ${input.phase} prompt...`
   });
 
@@ -95,6 +103,18 @@ async function collectTurnOutput(
     prompt: input.prompt,
     phase: input.phase
   })) {
+    if (event.type === "stderr") {
+      emitProgress({
+        sessionId: input.sessionId,
+        runId: input.runId,
+        type: "model_stream",
+        model,
+        phase: input.phase,
+        message: summarizeProgressText(event.text)
+      });
+      continue;
+    }
+
     if (event.type === "error") {
       providerError = event.message;
       continue;
@@ -102,19 +122,7 @@ async function collectTurnOutput(
 
     if (event.type === "structured_turn") {
       rawText = event.turn.rawText || event.turn.summary;
-      parsed = {
-        actor: event.turn.actor,
-        rawText: event.turn.rawText,
-        summary: event.turn.summary,
-        newInsights: event.turn.newInsights,
-        assumptions: event.turn.assumptions,
-        disagreements: event.turn.disagreements,
-        questionsForPeer: event.turn.questionsForPeer,
-        questionsForHuman: event.turn.questionsForHuman,
-        proposedSpecDelta: event.turn.proposedSpecDelta,
-        milestoneReached: event.turn.milestoneReached,
-        degraded: event.turn.degraded
-      };
+      parsed = { ...event.turn };
 
       // For degraded turns, rawText contains the full model JSON response.
       // Re-parse it to extract phase-specific fields (proposedQuestions, etc.)
@@ -146,6 +154,7 @@ async function collectTurnOutput(
     const errorMessage = providerError ?? `${model.toUpperCase()} returned no output`;
     emitProgress({
       sessionId: input.sessionId,
+      runId: input.runId,
       type: "info",
       model,
       phase: input.phase,
@@ -167,7 +176,7 @@ async function collectTurnOutput(
 
   const degraded = parsed?.degraded ? " (degraded)" : "";
   emitProgress({
-    sessionId: input.sessionId, type: "model_done", model,
+    sessionId: input.sessionId, runId: input.runId, type: "model_done", model,
     phase: input.phase, elapsedMs,
     message: `Done in ${elapsed}s — ${chars} chars${degraded}`
   });
@@ -191,14 +200,14 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
   });
 
   return {
-    async runDualAnalysis(sessionId: string, prompt: string): Promise<AnalysisResult> {
-      emitProgress({ sessionId, type: "phase_start", phase: "analysis", message: "Phase 1: Dual Analysis (GPT + Claude in parallel)" });
+    async runDualAnalysis(sessionId: string, prompt: string, runId?: string): Promise<AnalysisResult> {
+      emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis", message: "Phase 1: Dual Analysis (GPT + Claude in parallel)" });
       const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt });
       const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt });
 
       const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, prompt: gptPrompt, phase: "analysis" }),
-        collectTurnOutput(input.claude, { sessionId, prompt: claudePrompt, phase: "analysis" })
+        collectTurnOutput(input.gpt, { sessionId, runId, prompt: gptPrompt, phase: "analysis" }),
+        collectTurnOutput(input.claude, { sessionId, runId, prompt: claudePrompt, phase: "analysis" })
       ]);
 
       const gptQuestions: Array<ProposedQuestion & { proposedBy: "gpt" }> =
@@ -222,13 +231,14 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       prompt: string,
       gptAnalysis: string,
       claudeAnalysis: string,
-      questions: Array<ProposedQuestion & { proposedBy: string }>
+      questions: Array<ProposedQuestion & { proposedBy: string }>,
+      runId?: string
     ): Promise<QuestionDebateResult> {
       // Single parallel synthesis instead of multi-turn debate.
       // Both models independently review the proposed questions and produce
       // their preferred list. We merge the results. This replaces the old
       // 4-6 turn sequential debate (~350s) with a single parallel call (~60-170s).
-      emitProgress({ sessionId, type: "phase_start", phase: "analysis_debate", message: `Question Synthesis (${questions.length} proposed — both models filter in parallel)` });
+      emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis_debate", message: `Question Synthesis (${questions.length} proposed — both models filter in parallel)` });
 
       const synthesisPrompt = (role: "gpt" | "claude") => buildQuestionDebatePrompt({
         role,
@@ -241,8 +251,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       });
 
       const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, prompt: synthesisPrompt("gpt"), phase: "analysis_debate" }),
-        collectTurnOutput(input.claude, { sessionId, prompt: synthesisPrompt("claude"), phase: "analysis_debate" })
+        collectTurnOutput(input.gpt, { sessionId, runId, prompt: synthesisPrompt("gpt"), phase: "analysis_debate" }),
+        collectTurnOutput(input.claude, { sessionId, runId, prompt: synthesisPrompt("claude"), phase: "analysis_debate" })
       ]);
 
       // Extract synthesized questions from both, prefer Claude's if both produced them
@@ -276,7 +286,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         `Claude: ${claudeSummary}`
       ].join("\n");
 
-      emitProgress({ sessionId, type: "consensus", message: `Question synthesis complete — ${synthesized.length} questions selected` });
+      emitProgress({ sessionId, runId, type: "consensus", message: `Question synthesis complete — ${synthesized.length} questions selected` });
 
       return { synthesizedQuestions: synthesized, debateSummary };
     },
@@ -286,9 +296,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       prompt: string,
       question: { text: string; rationale: string },
       answer: string,
-      previousAnswers: Array<{ question: string; answer: string }>
+      previousAnswers: Array<{ question: string; answer: string }>,
+      runId?: string
     ): Promise<InterviewStepResult> {
-      emitProgress({ sessionId, type: "phase_start", phase: "interview", message: "Evaluating answer (GPT + Claude in parallel)" });
+      emitProgress({ sessionId, runId, type: "phase_start", phase: "interview", message: "Evaluating answer (GPT + Claude in parallel)" });
       const gptPromptText = buildInterviewFollowUpPrompt({
         role: "gpt",
         originalProblem: prompt,
@@ -308,8 +319,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       });
 
       const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, prompt: gptPromptText, phase: "interview" }),
-        collectTurnOutput(input.claude, { sessionId, prompt: claudePromptText, phase: "interview" })
+        collectTurnOutput(input.gpt, { sessionId, runId, prompt: gptPromptText, phase: "interview" }),
+        collectTurnOutput(input.claude, { sessionId, runId, prompt: claudePromptText, phase: "interview" })
       ]);
 
       const gptFollowUps = extractFollowUpQuestions(gptResult.parsed, "gpt");
@@ -339,9 +350,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
     async runApproachDebate(
       sessionId: string,
       prompt: string,
-      interviewResults: Array<{ question: string; answer: string }>
+      interviewResults: Array<{ question: string; answer: string }>,
+      runId?: string
     ): Promise<ApproachDebateResult> {
-      emitProgress({ sessionId, type: "phase_start", phase: "approach_debate", message: `Approach Debate (consensus-driven, ${interviewResults.length} interview answers as context)` });
+      emitProgress({ sessionId, runId, type: "phase_start", phase: "approach_debate", message: `Approach Debate (consensus-driven, ${interviewResults.length} interview answers as context)` });
       const enrichedPrompt = [
         prompt,
         "",
@@ -353,7 +365,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const round = await classicOrchestrator.runRound({
         sessionId,
-        prompt: enrichedPrompt
+        prompt: enrichedPrompt,
+        runId
       });
 
       const turns = round.state.turns.map((t) => ({
@@ -378,11 +391,11 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       sessionId: string,
       prompt: string,
       interviewResults: Array<{ question: string; answer: string }>,
-      approachResult: string
+      approachResult: string,
+      runId?: string
     ): Promise<SpecGenerationResult> {
-      // GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
-      // This is the core adversarial value: the reviewer catches what the drafter missed.
-      emitProgress({ sessionId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews)" });
+      // Step 1: GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
+      emitProgress({ sessionId, runId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews → both walkthrough → Claude revises)" });
 
       const draftPrompt = buildSpecPrompt({
         role: "gpt",
@@ -393,6 +406,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const draftResult = await collectTurnOutput(input.gpt, {
         sessionId,
+        runId,
         prompt: draftPrompt,
         phase: "spec_generation"
       });
@@ -405,7 +419,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const draftPlan = (draftResult.parsed?.implementationPlan as string) || "";
 
-      // Claude reviews GPT's draft — the adversarial step
+      // Step 2: Claude reviews GPT's draft — the adversarial document review
       const peerDraft = draftPlan
         ? `${draftSpec}\n\n---\n\nIMPLEMENTATION PLAN:\n${draftPlan}`
         : draftSpec;
@@ -420,26 +434,114 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
 
       const reviewResult = await collectTurnOutput(input.claude, {
         sessionId,
+        runId,
         prompt: reviewPrompt,
         phase: "spec_generation"
       });
 
-      const finalSpec =
+      const reviewedSpec =
         (reviewResult.parsed?.proposedSpecDelta as string) ||
         (reviewResult.parsed?.rawText as string) ||
         reviewResult.rawText ||
         draftSpec;
 
-      const implementationPlan =
+      const reviewedPlan =
         (reviewResult.parsed?.implementationPlan as string) ||
         (draftResult.parsed?.implementationPlan as string) ||
         "";
 
-      const summary =
-        (reviewResult.parsed?.summary as string) ||
-        "Spec and implementation plan generated";
+      // Step 3: Adversarial walkthrough — both models simulate executing the spec
+      // in parallel, surfacing operational gaps that document review misses.
+      emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: "Adversarial Walkthrough (both models simulate execution in parallel)" });
 
-      return { spec: finalSpec, implementationPlan, summary };
+      const [gptWalkthrough, claudeWalkthrough] = await Promise.all([
+        collectTurnOutput(input.gpt, {
+          sessionId,
+          runId,
+          prompt: buildWalkthroughPrompt({
+            role: "gpt",
+            originalProblem: prompt,
+            spec: reviewedSpec,
+            implementationPlan: reviewedPlan
+          }),
+          phase: "walkthrough"
+        }),
+        collectTurnOutput(input.claude, {
+          sessionId,
+          runId,
+          prompt: buildWalkthroughPrompt({
+            role: "claude",
+            originalProblem: prompt,
+            spec: reviewedSpec,
+            implementationPlan: reviewedPlan
+          }),
+          phase: "walkthrough"
+        })
+      ]);
+
+      // Collect gaps from both walkthroughs
+      const gptGaps = extractWalkthroughGaps(gptWalkthrough.parsed);
+      const claudeGaps = extractWalkthroughGaps(claudeWalkthrough.parsed);
+      const allGaps = deduplicateGaps([...gptGaps, ...claudeGaps]);
+
+      // Step 4: If gaps were found, Claude revises the spec incorporating the fixes
+      let finalSpec = reviewedSpec;
+      let implementationPlan = reviewedPlan;
+      let summary = (reviewResult.parsed?.summary as string) || "Spec and implementation plan generated";
+
+      if (allGaps.length > 0) {
+        emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
+
+        const gapReport = allGaps
+          .map((g, i) => `${i + 1}. **${g.location}**: ${g.issue}\n   Fix: ${g.fix}`)
+          .join("\n\n");
+
+        const revisionPrompt = buildSpecPrompt({
+          role: "claude",
+          originalProblem: prompt,
+          interviewResults,
+          approachResult,
+          peerDraft: [
+            reviewedSpec,
+            "",
+            "---",
+            "",
+            `IMPLEMENTATION PLAN:`,
+            reviewedPlan,
+            "",
+            "---",
+            "",
+            `ADVERSARIAL WALKTHROUGH FINDINGS:`,
+            `Both models independently simulated executing this spec and found the following operational gaps.`,
+            `Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.`,
+            "",
+            gapReport
+          ].join("\n")
+        });
+
+        const revisionResult = await collectTurnOutput(input.claude, {
+          sessionId,
+          runId,
+          prompt: revisionPrompt,
+          phase: "spec_generation"
+        });
+
+        finalSpec =
+          (revisionResult.parsed?.proposedSpecDelta as string) ||
+          (revisionResult.parsed?.rawText as string) ||
+          revisionResult.rawText ||
+          reviewedSpec;
+
+        implementationPlan =
+          (revisionResult.parsed?.implementationPlan as string) ||
+          reviewedPlan;
+
+        summary =
+          (revisionResult.parsed?.summary as string) ||
+          `Spec revised after adversarial walkthrough found ${allGaps.length} operational gap(s)`;
+      }
+
+      return { spec: finalSpec, implementationPlan, summary, walkthroughGaps: allGaps };
     }
   };
 }
@@ -519,6 +621,44 @@ function extractFollowUpQuestions<T extends "gpt" | "claude">(
   }
 
   return [];
+}
+
+function extractWalkthroughGaps(
+  parsed: Record<string, unknown> | null
+): WalkthroughGap[] {
+  if (!parsed) return [];
+
+  const gaps = parsed.walkthroughGaps as
+    | Array<{ location: string; issue: string; fix: string }>
+    | undefined;
+
+  if (Array.isArray(gaps)) {
+    return gaps
+      .filter((g) => g.location && g.issue && g.fix)
+      .map((g) => ({
+        location: String(g.location),
+        issue: String(g.issue),
+        fix: String(g.fix)
+      }));
+  }
+
+  return [];
+}
+
+function deduplicateGaps(gaps: WalkthroughGap[]): WalkthroughGap[] {
+  const seen = new Set<string>();
+  const result: WalkthroughGap[] = [];
+
+  for (const gap of gaps) {
+    // Deduplicate by normalizing the issue text
+    const key = gap.issue.toLowerCase().trim().slice(0, 100);
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(gap);
+    }
+  }
+
+  return result;
 }
 
 function deduplicateQuestions<T extends ProposedQuestion & { proposedBy: string }>(

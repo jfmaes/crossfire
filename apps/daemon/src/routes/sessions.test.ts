@@ -32,6 +32,28 @@ const fakeService = {
   },
   async getSession() {
     return fakeSession;
+  },
+  getRun() {
+    return {
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "restart",
+      status: "running",
+      phase: "analysis",
+      startedAt: new Date().toISOString()
+    };
+  },
+  listRunEvents() {
+    return [
+      {
+        id: "evt_1",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "phase_start",
+        message: "Phase 1 started",
+        createdAt: new Date().toISOString()
+      }
+    ];
   }
 };
 
@@ -125,6 +147,57 @@ describe("session routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().session.id).toBe("sess_1");
+    await app.close();
+  });
+
+  it("restarts a session asynchronously", async () => {
+    const app = buildServer({
+      accessToken: "secret-token",
+      sessionService: fakeService
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions/sess_1/restart",
+      headers: { "x-council-token": "secret-token" }
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json().session.id).toBe("sess_1");
+    await app.close();
+  });
+
+  it("returns a run payload", async () => {
+    const app = buildServer({
+      accessToken: "secret-token",
+      sessionService: fakeService
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/runs/run_1",
+      headers: { "x-council-token": "secret-token" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().id).toBe("run_1");
+    await app.close();
+  });
+
+  it("returns run events", async () => {
+    const app = buildServer({
+      accessToken: "secret-token",
+      sessionService: fakeService
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/runs/run_1/events",
+      headers: { "x-council-token": "secret-token" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()[0].runId).toBe("run_1");
     await app.close();
   });
 });

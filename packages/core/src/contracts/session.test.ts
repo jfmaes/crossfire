@@ -14,6 +14,12 @@ describe("session contracts", () => {
       questionsForHuman: [],
       proposedSpecDelta: "Add hybrid checkpointing",
       milestoneReached: null,
+      implementationPlan: null,
+      proposedQuestions: null,
+      synthesizedQuestions: null,
+      followUpQuestions: null,
+      sufficientContext: null,
+      walkthroughGaps: null,
       degraded: false
     });
 

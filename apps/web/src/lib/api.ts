@@ -30,6 +30,26 @@ export interface SessionPayload {
     decisionsNeeded: string[];
     artifactPath?: string | null;
   };
+  activeRun?: {
+    id: string;
+    sessionId: string;
+    kind: string;
+    status: string;
+    phase?: string | null;
+    startedAt: string;
+    finishedAt?: string | null;
+    errorMessage?: string | null;
+  };
+  recentRuns?: Array<{
+    id: string;
+    sessionId: string;
+    kind: string;
+    status: string;
+    phase?: string | null;
+    startedAt: string;
+    finishedAt?: string | null;
+    errorMessage?: string | null;
+  }>;
   artifactPath?: string | null;
   phaseResult?: unknown;
   analysisResult?: {
@@ -46,6 +66,31 @@ export interface SessionPayload {
   interviewState?: InterviewState;
 }
 
+export interface SessionRun {
+  id: string;
+  sessionId: string;
+  kind: string;
+  status: string;
+  phase?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface SessionRunEvent {
+  id: string;
+  runId: string;
+  sessionId: string;
+  type: string;
+  message: string;
+  model?: string | null;
+  phase?: string | null;
+  turnNumber?: number | null;
+  elapsedMs?: number | null;
+  disagreements?: number | null;
+  createdAt: string;
+}
+
 export interface RuntimeStatus {
   providerMode: string;
   providers: {
@@ -56,6 +101,19 @@ export interface RuntimeStatus {
 
 function getToken() {
   return localStorage.getItem("council-token") ?? "local-dev-token";
+}
+
+async function getErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json() as { error?: string };
+    if (typeof body.error === "string" && body.error.trim()) {
+      return body.error;
+    }
+  } catch {
+    // Ignore non-JSON error bodies
+  }
+
+  return fallback;
 }
 
 export async function createSession(input: {
@@ -79,7 +137,7 @@ export async function createSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to create session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to create session: ${response.status}`));
   }
 
   return (await response.json()) as SessionPayload;
@@ -103,7 +161,7 @@ export async function continueSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to continue session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to continue session: ${response.status}`));
   }
 
   return (await response.json()) as SessionPayload;
@@ -124,7 +182,7 @@ export async function listSessions(baseUrl = "") {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to list sessions: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to list sessions: ${response.status}`));
   }
 
   return (await response.json()) as SessionListItem[];
@@ -142,7 +200,7 @@ export async function getSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to get session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to get session: ${response.status}`));
   }
 
   return (await response.json()) as SessionPayload;
@@ -161,10 +219,28 @@ export async function restartSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to restart session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to restart session: ${response.status}`));
   }
 
   return (await response.json()) as SessionPayload;
+}
+
+export async function getRunEvents(input: {
+  runId: string;
+  token: string;
+  baseUrl?: string;
+}) {
+  const response = await fetch(`${input.baseUrl ?? ""}/runs/${input.runId}/events`, {
+    headers: {
+      "x-council-token": input.token
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response, `Failed to get run events: ${response.status}`));
+  }
+
+  return (await response.json()) as SessionRunEvent[];
 }
 
 export async function deleteSession(input: {
@@ -180,7 +256,7 @@ export async function deleteSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to delete session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to delete session: ${response.status}`));
   }
 }
 
@@ -196,7 +272,7 @@ export async function exportSession(input: {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to export session: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to export session: ${response.status}`));
   }
 
   const blob = await response.blob();
@@ -222,7 +298,7 @@ export async function getHealth(baseUrl = "") {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to load health: ${response.status}`);
+    throw new Error(await getErrorMessage(response, `Failed to load health: ${response.status}`));
   }
 
   return (await response.json()) as RuntimeStatus;

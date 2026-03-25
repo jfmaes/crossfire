@@ -77,7 +77,7 @@ export class ClaudeCliProcess implements ClaudeProcess {
   } = {}) {
     this.command = input.command ?? "claude";
     this.spawnProcess = input.spawnProcess ?? defaultSpawnProcess;
-    this.timeoutMs = input.timeoutMs ?? 600_000;
+    this.timeoutMs = input.timeoutMs ?? 1_200_000;
   }
 
   async *runTurn(input: { sessionId: string; prompt: string; degraded?: boolean; resumeSessionId?: string }) {

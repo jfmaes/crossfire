@@ -4,6 +4,8 @@ import type { ProviderAdapter, ProviderTurnInput } from "@council/adapters";
 import { createInMemoryDatabase, SessionRepository } from "@council/storage";
 import { createSessionService } from "./session-service";
 
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function createPhaseAwareProvider(name: "gpt" | "claude"): ProviderAdapter {
   return {
     name,
@@ -19,6 +21,12 @@ function createPhaseAwareProvider(name: "gpt" | "claude"): ProviderAdapter {
         questionsForHuman: [`What is the target platform?`],
         proposedSpecDelta: "",
         milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
         degraded: false
       };
       yield { type: "structured_turn", actor: name, turn } as const;
@@ -31,6 +39,22 @@ function createPhaseAwareProvider(name: "gpt" | "claude"): ProviderAdapter {
 }
 
 describe("session-service spec-driven lifecycle", () => {
+  async function waitForSettledSession(
+    service: ReturnType<typeof createSessionService>,
+    id: string,
+    attempts = 20
+  ) {
+    for (let i = 0; i < attempts; i++) {
+      const current = await service.getSession(id);
+      if (current && !current.activeRun) {
+        return current;
+      }
+      await delay(10);
+    }
+
+    throw new Error(`Session ${id} did not settle in time`);
+  }
+
   function createService() {
     return createSessionService({
       repository: new SessionRepository(createInMemoryDatabase()),
@@ -47,11 +71,13 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Design a collaborative editor"
     });
 
-    // Analysis runs and auto-advances to interview — no checkpoint in between
-    expect(result.session.phase).toBe("interview");
-    expect(result.session.status).toBe("interviewing");
-    expect((result as Record<string, unknown>).analysisResult).toBeDefined();
-    expect((result as Record<string, unknown>).interviewState).toBeDefined();
+    expect(result.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, result.session.id);
+    expect(settled.session.phase).toBe("interview");
+    expect(settled.session.status).toBe("interviewing");
+    expect((settled as Record<string, unknown>).analysisResult).toBeDefined();
+    expect((settled as Record<string, unknown>).interviewState).toBeDefined();
   });
 
   it("handles interview answers and advances to approach_debate", async () => {
@@ -62,15 +88,18 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
-    // Session starts in interview; send "enough" to skip to approach debate
-    expect(created.session.phase).toBe("interview");
+    const initial = await waitForSettledSession(service, created.session.id);
+    expect(initial.session.phase).toBe("interview");
+
     const afterEnough = await service.continueSession({
       id: created.session.id,
       humanResponse: "enough"
     });
 
-    expect(afterEnough).not.toBeNull();
-    expect(afterEnough!.session.phase).toBe("approach_debate");
+    expect(afterEnough?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.phase).toBe("approach_debate");
   });
 
   it("transitions from approach_debate to spec_generation on continue", async () => {
@@ -81,11 +110,15 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
+    await waitForSettledSession(service, created.session.id);
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
     const result = await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
 
-    expect(result).not.toBeNull();
-    expect(result!.session.phase).toBe("spec_generation");
+    expect(result?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.phase).toBe("spec_generation");
   });
 
   it("finalizes on approve at spec_generation", async () => {
@@ -96,8 +129,11 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
+    await waitForSettledSession(service, created.session.id);
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
     await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
+    await waitForSettledSession(service, created.session.id);
 
     const finalized = await service.continueSession({ id: created.session.id, humanResponse: "approve" });
 
@@ -113,17 +149,22 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Build an app"
     });
 
+    await waitForSettledSession(service, created.session.id);
     await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
     await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
+    await waitForSettledSession(service, created.session.id);
 
     const revised = await service.continueSession({
       id: created.session.id,
       humanResponse: "Add more detail about auth"
     });
 
-    expect(revised).not.toBeNull();
-    expect(revised!.session.phase).toBe("spec_generation");
-    expect(revised!.session.status).toBe("checkpoint");
+    expect(revised?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.phase).toBe("spec_generation");
+    expect(settled.session.status).toBe("checkpoint");
   });
 
   it("persists the full prompt", async () => {
@@ -166,8 +207,10 @@ describe("session-service spec-driven lifecycle", () => {
       humanResponse: "retry"
     });
 
-    expect(recovered).not.toBeNull();
-    expect(recovered!.session.status).not.toBe("errored");
+    expect(recovered?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.status).not.toBe("errored");
   });
 
   it("getSession returns phase and interview data", async () => {
@@ -178,7 +221,7 @@ describe("session-service spec-driven lifecycle", () => {
       prompt: "Design an app"
     });
 
-    const fetched = await service.getSession(created.session.id);
+    const fetched = await waitForSettledSession(service, created.session.id);
     expect(fetched).not.toBeNull();
     expect((fetched as Record<string, unknown>).interviewState).toBeDefined();
   });

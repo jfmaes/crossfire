@@ -10,8 +10,60 @@ import { afterEach } from "vitest";
 import { createSessionService } from "./session-service";
 
 let tempDir: string | undefined;
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function createDelayedQuestionProvider(name: "gpt" | "claude", delayMs = 25): ProviderAdapter {
+  return {
+    name,
+    async *sendTurn(_input: ProviderTurnInput) {
+      await delay(delayMs);
+
+      const turn: ModelTurn = {
+        actor: name,
+        rawText: `${name} delayed response`,
+        summary: `${name} delayed summary`,
+        newInsights: [`${name} insight`],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: ["What is the target platform?"],
+        proposedSpecDelta: "",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      };
+
+      yield { type: "structured_turn", actor: name, turn } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "delayed provider ready" };
+    }
+  };
+}
 
 describe("createSessionService", () => {
+  async function waitForSettledSession(
+    service: ReturnType<typeof createSessionService>,
+    id: string,
+    attempts = 20
+  ) {
+    for (let i = 0; i < attempts; i++) {
+      const current = await service.getSession(id);
+      if (current && !current.activeRun) {
+        return current;
+      }
+      await delay(10);
+    }
+
+    throw new Error(`Session ${id} did not settle in time`);
+  }
+
   afterEach(async () => {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true });
@@ -49,17 +101,19 @@ describe("createSessionService", () => {
       prompt: "Initial problem"
     });
 
-    // FakeProvider produces no questions, so it skips to approach debate
-    expect(created.session.phase).toBe("approach_debate");
+    const initial = await waitForSettledSession(service, created.session.id);
+    expect(initial.session.phase).toBe("approach_debate");
 
     const continued = await service.continueSession({
       id: created.session.id,
       humanResponse: "Proceed to spec"
     });
 
-    expect(continued).not.toBeNull();
-    expect(continued!.session.id).toBe(created.session.id);
-    expect(continued!.summary.currentUnderstanding).toBeTruthy();
+    expect(continued?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.id).toBe(created.session.id);
+    expect(settled.summary.currentUnderstanding).toBeTruthy();
   });
 
   it("returns null when continuing a nonexistent session", async () => {
@@ -102,6 +156,12 @@ describe("createSessionService", () => {
           questionsForHuman: [],
           proposedSpecDelta: "",
           milestoneReached: null,
+          implementationPlan: null,
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: null,
           degraded: false
         };
 
@@ -132,5 +192,66 @@ describe("createSessionService", () => {
 
     expect(seenPrompt).toContain("Grounding context:");
     expect(seenPrompt).toContain("# Grounded context");
+  });
+
+  it("restarts non-finalized sessions in place asynchronously from phase 0", async () => {
+    const service = createSessionService({
+      repository: new SessionRepository(createInMemoryDatabase()),
+      gpt: createDelayedQuestionProvider("gpt"),
+      claude: createDelayedQuestionProvider("claude")
+    });
+
+    const created = await service.createSession({
+      title: "Restartable session",
+      prompt: "Help me design a dual-LLM planning app"
+    });
+
+    const initial = await waitForSettledSession(service, created.session.id);
+    expect(initial.session.phase).toBe("interview");
+
+    const restarted = await service.restartSession(created.session.id);
+    expect(restarted).not.toBeNull();
+    expect(restarted!.session.id).toBe(created.session.id);
+    expect(restarted!.session.phase).toBe("analysis");
+    expect(restarted!.session.status).toBe("debating");
+    expect(restarted!.interviewState?.questions).toHaveLength(0);
+
+    await delay(120);
+
+    const rerun = await service.getSession(created.session.id);
+    expect(rerun).not.toBeNull();
+    expect(rerun!.session.phase).toBe("interview");
+    expect(rerun!.interviewState?.questions.length).toBeGreaterThan(0);
+  });
+
+  it("restarts finalized sessions as brand-new sessions", async () => {
+    const service = createSessionService({
+      repository: new SessionRepository(createInMemoryDatabase()),
+      gpt: createDelayedQuestionProvider("gpt"),
+      claude: createDelayedQuestionProvider("claude")
+    });
+
+    const created = await service.createSession({
+      title: "Finalizable session",
+      prompt: "Design a system"
+    });
+
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
+    await waitForSettledSession(service, created.session.id);
+    const finalized = await service.continueSession({ id: created.session.id, humanResponse: "approve" });
+
+    expect(finalized?.session.status).toBe("finalized");
+
+    const restarted = await service.restartSession(created.session.id);
+    expect(restarted).not.toBeNull();
+    expect(restarted!.session.id).not.toBe(created.session.id);
+    expect(restarted!.session.phase).toBe("analysis");
+    expect(restarted!.session.status).toBe("debating");
+
+    const original = await service.getSession(created.session.id);
+    expect(original?.session.status).toBe("finalized");
   });
 });

@@ -12,4 +12,12 @@ describe("App", () => {
     expect(screen.getByLabelText("Problem statement")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start session" })).toBeTruthy();
   });
+
+  it("renders without crashing on a run-deeplink hash", () => {
+    location.hash = "#/session/sess_1/run/run_1";
+    const { unmount } = render(<App />);
+    expect(screen.getAllByRole("heading", { name: "Crossfire" }).length).toBeGreaterThan(0);
+    unmount();
+    location.hash = "";
+  });
 });

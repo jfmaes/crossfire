@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
 import type { ProviderAdapter } from "@council/adapters";
 import type { SessionRepository, InterviewQuestionRow } from "@council/storage";
 import { collectGroundingContext } from "./grounding";
 import { writeSpecArtifact } from "./artifacts";
 import { createPhaseOrchestrator } from "./phase-orchestrator";
+import { onProgress } from "./progress";
 
 interface CreateSessionInput {
   title: string;
@@ -52,6 +54,60 @@ export function createSessionService(input: SessionServiceInput) {
     });
     sessionLocks.set(sessionId, lock);
     return { acquired: true, release };
+  }
+
+  function startBackgroundTask(sessionId: string, runId: string, task: () => Promise<void>): boolean {
+    const lock = acquireSessionLock(sessionId);
+    if (!lock.acquired) {
+      return false;
+    }
+
+    const unsubscribe = onProgress((event) => {
+      if (event.runId !== runId) return;
+
+      input.repository.saveRunEvent({
+        id: randomUUID(),
+        runId,
+        sessionId,
+        type: event.type,
+        message: event.message,
+        model: event.model ?? null,
+        phase: event.phase ?? null,
+        turnNumber: event.turnNumber ?? null,
+        elapsedMs: event.elapsedMs ?? null,
+        disagreements: event.disagreements ?? null,
+        createdAt: new Date().toISOString()
+      });
+    });
+
+    void (async () => {
+      try {
+        await task();
+        const session = input.repository.findById(sessionId);
+        input.repository.updateRun({
+          id: runId,
+          status: session?.status === "finalized" ? "completed" : session?.status ?? "completed",
+          phase: session?.phase ?? null,
+          finishedAt: new Date().toISOString(),
+          errorMessage: null
+        });
+      } catch (error) {
+        console.error(`Background task failed for session ${sessionId}:`, error);
+        const session = input.repository.findById(sessionId);
+        input.repository.updateRun({
+          id: runId,
+          status: session?.status === "errored" ? "failed" : "failed",
+          phase: session?.phase ?? null,
+          finishedAt: new Date().toISOString(),
+          errorMessage: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        unsubscribe();
+        lock.release();
+      }
+    })();
+
+    return true;
   }
 
   async function buildPrompt(prompt: string) {
@@ -110,6 +166,206 @@ export function createSessionService(input: SessionServiceInput) {
     }
   }
 
+  async function buildSessionPayload(id: string) {
+    const session = input.repository.findById(id);
+    const summary = input.repository.findSummaryBySessionId(id);
+
+    if (!session || !summary) {
+      return null;
+    }
+
+    // Legacy: auto-advance sessions stuck at analysis checkpoint.
+    if (session.phase === "analysis" && session.status === "checkpoint") {
+      input.repository.updatePhase({ id, phase: "interview" });
+      input.repository.updateStatus({ id, status: "interviewing" });
+      session.phase = "interview";
+      session.status = "interviewing";
+      const interviewState = buildInterviewState(id);
+      summary.currentUnderstanding = "Analysis complete. Answer the interview questions below.";
+      summary.recommendation = interviewState.currentQuestion?.text || "No questions remaining";
+      summary.decisionsNeeded = [];
+      input.repository.saveSummary({
+        sessionId: id,
+        currentUnderstanding: summary.currentUnderstanding,
+        recommendation: summary.recommendation,
+        changedSinceLastCheckpoint: summary.changedSinceLastCheckpoint,
+        openRisks: summary.openRisks,
+        decisionsNeeded: summary.decisionsNeeded,
+        artifactPath: summary.artifactPath ?? null
+      });
+    }
+
+    return {
+      session,
+      activeRun: input.repository.findActiveRun(id) ?? undefined,
+      recentRuns: input.repository.findRunsBySession(id),
+      summary,
+      interviewState: buildInterviewState(id),
+      phaseResult: session.phase ? getPhaseResult(id, session.phase) : null,
+      analysisResult: getPhaseResult(id, "analysis") ?? undefined
+    };
+  }
+
+  async function resetSessionForRestart(id: string) {
+    const previousSummary = input.repository.findSummaryBySessionId(id);
+    if (previousSummary?.artifactPath) {
+      await unlink(previousSummary.artifactPath).catch(() => {});
+    }
+
+    input.repository.deleteInterviewQuestions(id);
+    input.repository.deletePhaseResults(id);
+    input.repository.updatePhase({ id, phase: "analysis" });
+    input.repository.updateStatus({ id, status: "debating" });
+    input.repository.saveSummary({
+      sessionId: id,
+      currentUnderstanding: "Restarting session from scratch.",
+      recommendation: "Phase 1 is running again. Watch live progress while Crossfire rebuilds the session.",
+      changedSinceLastCheckpoint: ["Session restarted"],
+      openRisks: [],
+      decisionsNeeded: [],
+      artifactPath: null
+    });
+  }
+
+  async function runSessionFromScratch(id: string, prompt: string, options?: { restarted?: boolean; runId?: string }) {
+    let analysisResult;
+    try {
+      analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt, options?.runId);
+    } catch (error) {
+      input.repository.updateStatus({ id, status: "errored" });
+      throw error;
+    }
+
+    input.repository.savePhaseResult({
+      sessionId: id,
+      phase: "analysis",
+      resultJson: JSON.stringify(analysisResult)
+    });
+
+    let debateResult;
+    try {
+      debateResult = await phaseOrchestrator.runQuestionDebate(
+        id,
+        prompt,
+        analysisResult.gptAnalysis,
+        analysisResult.claudeAnalysis,
+        analysisResult.proposedQuestions,
+        options?.runId
+      );
+    } catch (error) {
+      input.repository.updateStatus({ id, status: "errored" });
+      throw error;
+    }
+
+    input.repository.savePhaseResult({
+      sessionId: id,
+      phase: "analysis_debate",
+      resultJson: JSON.stringify(debateResult)
+    });
+
+    const questionRows: InterviewQuestionRow[] = debateResult.synthesizedQuestions.length > 0
+      ? debateResult.synthesizedQuestions.map((q, i) => ({
+          id: q.id,
+          sessionId: id,
+          text: q.text,
+          priority: q.priority,
+          rationale: q.rationale,
+          proposedBy: q.proposedBy,
+          answer: null,
+          sortOrder: i
+        }))
+      : analysisResult.proposedQuestions.map((q, i) => ({
+          id: randomUUID(),
+          sessionId: id,
+          text: q.text,
+          priority: q.priority,
+          rationale: q.rationale,
+          proposedBy: q.proposedBy,
+          answer: null,
+          sortOrder: i
+        }));
+
+    if (questionRows.length > 0) {
+      input.repository.saveInterviewQuestions(questionRows);
+    }
+
+    const interviewState = buildInterviewState(id);
+
+    // If no questions were produced, skip straight to approach debate.
+    if (!interviewState.currentQuestion) {
+      return advanceToApproachDebate(id, prompt, options?.runId);
+    }
+
+    input.repository.updatePhase({ id, phase: "interview" });
+    input.repository.updateStatus({ id, status: "interviewing" });
+
+    const summary = {
+      currentUnderstanding: "Analysis complete. Answer the interview questions below.",
+      recommendation: interviewState.currentQuestion.text,
+      changedSinceLastCheckpoint: options?.restarted
+        ? ["Session restarted", "Analysis complete"]
+        : ["Analysis complete"],
+      openRisks: [],
+      decisionsNeeded: []
+    };
+    input.repository.saveSummary({
+      sessionId: id,
+      ...summary,
+      artifactPath: null
+    });
+
+    return {
+      session: input.repository.findById(id)!,
+      summary,
+      analysisResult: {
+        ...analysisResult,
+        debateSummary: debateResult.debateSummary
+      },
+      interviewState
+    };
+  }
+
+  async function enqueueRun(inputRun: {
+    sessionId: string;
+    kind: string;
+    phase: string;
+    summary: {
+      currentUnderstanding: string;
+      recommendation: string;
+      changedSinceLastCheckpoint: string[];
+      openRisks: string[];
+      decisionsNeeded: string[];
+    };
+    task: (runId: string) => Promise<void>;
+  }) {
+    if (sessionLocks.has(inputRun.sessionId)) {
+      return buildSessionPayload(inputRun.sessionId);
+    }
+
+    input.repository.updatePhase({ id: inputRun.sessionId, phase: inputRun.phase });
+    input.repository.updateStatus({ id: inputRun.sessionId, status: "debating" });
+    input.repository.saveSummary({
+      sessionId: inputRun.sessionId,
+      ...inputRun.summary,
+      artifactPath: null
+    });
+
+    const runId = randomUUID();
+    input.repository.createRun({
+      id: runId,
+      sessionId: inputRun.sessionId,
+      kind: inputRun.kind,
+      status: "running",
+      phase: inputRun.phase,
+      startedAt: new Date().toISOString()
+    });
+
+    startBackgroundTask(inputRun.sessionId, runId, async () => {
+      await inputRun.task(runId);
+    });
+    return buildSessionPayload(inputRun.sessionId);
+  }
+
   return {
     async createSession(payload: CreateSessionInput) {
       const id = randomUUID();
@@ -126,103 +382,21 @@ export function createSessionService(input: SessionServiceInput) {
         phase: "analysis",
         prompt
       });
-
-      // Step 1: Dual independent analysis
-      let analysisResult;
-      try {
-        analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt);
-      } catch (error) {
-        input.repository.updateStatus({ id, status: "errored" });
-        throw error;
-      }
-
-      input.repository.savePhaseResult({
+      return enqueueRun({
         sessionId: id,
+        kind: "create",
         phase: "analysis",
-        resultJson: JSON.stringify(analysisResult)
-      });
-
-      // Step 2: Immediately debate the proposed questions — no checkpoint between
-      let debateResult;
-      try {
-        debateResult = await phaseOrchestrator.runQuestionDebate(
-          id,
-          prompt,
-          analysisResult.gptAnalysis,
-          analysisResult.claudeAnalysis,
-          analysisResult.proposedQuestions
-        );
-      } catch (error) {
-        input.repository.updateStatus({ id, status: "errored" });
-        throw error;
-      }
-
-      input.repository.savePhaseResult({
-        sessionId: id,
-        phase: "analysis_debate",
-        resultJson: JSON.stringify(debateResult)
-      });
-
-      // Save the debated/synthesized questions (not the raw unvetted ones)
-      const questionRows: InterviewQuestionRow[] = debateResult.synthesizedQuestions.length > 0
-        ? debateResult.synthesizedQuestions.map((q, i) => ({
-            id: q.id,
-            sessionId: id,
-            text: q.text,
-            priority: q.priority,
-            rationale: q.rationale,
-            proposedBy: q.proposedBy,
-            answer: null,
-            sortOrder: i
-          }))
-        : analysisResult.proposedQuestions.map((q, i) => ({
-            id: randomUUID(),
-            sessionId: id,
-            text: q.text,
-            priority: q.priority,
-            rationale: q.rationale,
-            proposedBy: q.proposedBy,
-            answer: null,
-            sortOrder: i
-          }));
-
-      if (questionRows.length > 0) {
-        input.repository.saveInterviewQuestions(questionRows);
-      }
-
-      const interviewState = buildInterviewState(id);
-
-      // If no questions were produced, skip straight to approach debate.
-      if (!interviewState.currentQuestion) {
-        return advanceToApproachDebate(id, prompt);
-      }
-
-      // Auto-advance to interview — no checkpoint between analysis and interview.
-      input.repository.updatePhase({ id, phase: "interview" });
-      input.repository.updateStatus({ id, status: "interviewing" });
-
-      const summary = {
-        currentUnderstanding: "Analysis complete. Answer the interview questions below.",
-        recommendation: interviewState.currentQuestion.text,
-        changedSinceLastCheckpoint: ["Analysis complete"],
-        openRisks: [],
-        decisionsNeeded: []
-      };
-      input.repository.saveSummary({
-        sessionId: id,
-        ...summary,
-        artifactPath: null
-      });
-
-      return {
-        session: input.repository.findById(id)!,
-        summary,
-        analysisResult: {
-          ...analysisResult,
-          debateSummary: debateResult.debateSummary
+        summary: {
+          currentUnderstanding: "Session created. Phase 1 is starting.",
+          recommendation: "Watch live progress while Crossfire runs the initial analysis and question synthesis.",
+          changedSinceLastCheckpoint: ["Session created"],
+          openRisks: [],
+          decisionsNeeded: []
         },
-        interviewState
-      };
+        task: async (runId) => {
+          await runSessionFromScratch(id, prompt, { runId });
+        }
+      });
     },
 
     async continueSession(payload: { id: string; humanResponse: string }) {
@@ -231,25 +405,34 @@ export function createSessionService(input: SessionServiceInput) {
         return null;
       }
 
-      const lock = acquireSessionLock(payload.id);
-      if (!lock.acquired) {
-        throw new SessionConflictError(payload.id);
+      if (sessionLocks.has(payload.id)) {
+        return buildSessionPayload(payload.id);
       }
 
-      try {
-        console.log(`\n━━━ Continue session: ${session.id.slice(0, 8)} ━━━`);
-        console.log(`  Phase: ${session.phase}  Status: ${session.status}`);
-        console.log(`  Human: "${payload.humanResponse.slice(0, 100)}${payload.humanResponse.length > 100 ? "..." : ""}"`);
+      console.log(`\n━━━ Continue session: ${session.id.slice(0, 8)} ━━━`);
+      console.log(`  Phase: ${session.phase}  Status: ${session.status}`);
+      console.log(`  Human: "${payload.humanResponse.slice(0, 100)}${payload.humanResponse.length > 100 ? "..." : ""}"`);
 
-        if (session.status === "errored") {
-          console.log("  Retrying errored phase...");
-          return retryPhase(session, payload.humanResponse);
+      if (session.status === "errored") {
+        console.log("  Retrying errored phase...");
+        return enqueueRun({
+          sessionId: payload.id,
+          kind: "retry",
+          phase: session.phase ?? "analysis",
+        summary: {
+          currentUnderstanding: "Retrying the errored phase.",
+          recommendation: "Watch live progress while Crossfire reruns the failed step.",
+          changedSinceLastCheckpoint: ["Retry requested"],
+          openRisks: [],
+          decisionsNeeded: []
+        },
+        task: async (runId) => {
+          await retryPhase(session, payload.humanResponse, runId);
         }
-
-        return continuePhase(session, payload.humanResponse);
-      } finally {
-        lock.release();
+      });
       }
+
+      return continuePhase(session, payload.humanResponse);
     },
 
     listSessions() {
@@ -257,41 +440,7 @@ export function createSessionService(input: SessionServiceInput) {
     },
 
     async getSession(id: string) {
-      const session = input.repository.findById(id);
-      const summary = input.repository.findSummaryBySessionId(id);
-
-      if (!session || !summary) {
-        return null;
-      }
-
-      // Legacy: auto-advance sessions stuck at analysis checkpoint.
-      if (session.phase === "analysis" && session.status === "checkpoint") {
-        input.repository.updatePhase({ id, phase: "interview" });
-        input.repository.updateStatus({ id, status: "interviewing" });
-        session.phase = "interview";
-        session.status = "interviewing";
-        const interviewState = buildInterviewState(id);
-        summary.currentUnderstanding = "Analysis complete. Answer the interview questions below.";
-        summary.recommendation = interviewState.currentQuestion?.text || "No questions remaining";
-        summary.decisionsNeeded = [];
-        input.repository.saveSummary({
-          sessionId: id,
-          currentUnderstanding: summary.currentUnderstanding,
-          recommendation: summary.recommendation,
-          changedSinceLastCheckpoint: summary.changedSinceLastCheckpoint,
-          openRisks: summary.openRisks,
-          decisionsNeeded: summary.decisionsNeeded,
-          artifactPath: summary.artifactPath ?? null
-        });
-      }
-
-      return {
-        session,
-        summary,
-        interviewState: buildInterviewState(id),
-        phaseResult: session.phase ? getPhaseResult(id, session.phase) : null,
-        analysisResult: getPhaseResult(id, "analysis") ?? undefined
-      };
+      return buildSessionPayload(id);
     },
 
     exportSession(id: string) {
@@ -301,6 +450,7 @@ export function createSessionService(input: SessionServiceInput) {
       const summary = input.repository.findSummaryBySessionId(id);
       const interviewQuestions = input.repository.findInterviewQuestions(id);
       const phaseResults = input.repository.findAllPhaseResults(id);
+      const runs = input.repository.findRunsBySession(id, 50);
 
       const phases: Record<string, unknown> = {};
       for (const row of phaseResults) {
@@ -314,6 +464,8 @@ export function createSessionService(input: SessionServiceInput) {
       return {
         exportedAt: new Date().toISOString(),
         session,
+        activeRun: input.repository.findActiveRun(id) ?? null,
+        recentRuns: runs,
         summary: summary ?? null,
         interviewQuestions: interviewQuestions.map((q) => ({
           id: q.id,
@@ -323,114 +475,98 @@ export function createSessionService(input: SessionServiceInput) {
           proposedBy: q.proposedBy,
           answer: q.answer
         })),
-        phaseResults: phases
+        phaseResults: phases,
+        runEventsByRun: runs.map((run) => ({
+          run,
+          events: input.repository.findRunEvents(run.id, 500)
+        }))
       };
+    },
+
+    getRun(id: string) {
+      return input.repository.findRunById(id) ?? null;
+    },
+
+    listRunEvents(runId: string) {
+      return input.repository.findRunEvents(runId, 500);
     },
 
     async restartSession(id: string) {
       const session = input.repository.findById(id);
       if (!session) return null;
 
-      const lock = acquireSessionLock(id);
-      if (!lock.acquired) {
-        throw new SessionConflictError(id);
+      const prompt = getOriginalPrompt(session);
+
+      // Finalized sessions keep their completed artifacts and history.
+      // A "restart" becomes a brand-new session seeded with the same prompt.
+      if (session.status === "finalized") {
+        const newId = randomUUID();
+        const runId = randomUUID();
+        input.repository.create({
+          id: newId,
+          title: session.title,
+          status: "debating",
+          phase: "analysis",
+          prompt
+        });
+        input.repository.saveSummary({
+          sessionId: newId,
+          currentUnderstanding: "Starting a new session from the finalized run's prompt.",
+          recommendation: "Phase 1 is running. Watch live progress while Crossfire rebuilds the session.",
+          changedSinceLastCheckpoint: ["New session created from finalized run"],
+          openRisks: [],
+          decisionsNeeded: [],
+          artifactPath: null
+        });
+        input.repository.createRun({
+          id: runId,
+          sessionId: newId,
+          kind: "restart",
+          status: "running",
+          phase: "analysis",
+          startedAt: new Date().toISOString()
+        });
+
+        startBackgroundTask(newId, runId, async () => {
+          input.gpt.clearSession?.(newId);
+          input.claude.clearSession?.(newId);
+          console.log(`\n━━━ Restart finalized session as new run: ${newId.slice(0, 8)} ━━━`);
+          console.log(`  Source session: ${id.slice(0, 8)}`);
+          console.log(`  Title: ${session.title}`);
+          console.log(`  Prompt: ${prompt.length} chars`);
+          await runSessionFromScratch(newId, prompt, { restarted: true, runId });
+        });
+
+        return buildSessionPayload(newId);
       }
 
-      try {
-        // Clear cached CLI sessions so the restart starts fresh conversations.
+      // Non-finalized sessions restart in place from phase 0 semantics.
+      // If a restart is already running, return the live payload instead of throwing.
+      if (sessionLocks.has(id)) {
+        return buildSessionPayload(id);
+      }
+
+      await resetSessionForRestart(id);
+      const runId = randomUUID();
+      input.repository.createRun({
+        id: runId,
+        sessionId: id,
+        kind: "restart",
+        status: "running",
+        phase: "analysis",
+        startedAt: new Date().toISOString()
+      });
+
+      startBackgroundTask(id, runId, async () => {
         input.gpt.clearSession?.(id);
         input.claude.clearSession?.(id);
-
-        const prompt = getOriginalPrompt(session);
-
         console.log(`\n━━━ Restart session: ${id.slice(0, 8)} ━━━`);
         console.log(`  Title: ${session.title}`);
         console.log(`  Original prompt: ${prompt.length} chars`);
+        await runSessionFromScratch(id, prompt, { restarted: true, runId });
+      });
 
-        // Clear all phase data and re-run from scratch
-        input.repository.deleteInterviewQuestions(id);
-        input.repository.deletePhaseResults(id);
-        input.repository.updatePhase({ id, phase: "analysis" });
-        input.repository.updateStatus({ id, status: "debating" });
-
-        // Re-run the full analysis + question debate
-        let analysisResult;
-        try {
-          analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt);
-        } catch (error) {
-          input.repository.updateStatus({ id, status: "errored" });
-          throw error;
-        }
-
-        input.repository.savePhaseResult({
-          sessionId: id,
-          phase: "analysis",
-          resultJson: JSON.stringify(analysisResult)
-        });
-
-        let debateResult;
-        try {
-          debateResult = await phaseOrchestrator.runQuestionDebate(
-            id, prompt,
-            analysisResult.gptAnalysis, analysisResult.claudeAnalysis,
-            analysisResult.proposedQuestions
-          );
-        } catch (error) {
-          input.repository.updateStatus({ id, status: "errored" });
-          throw error;
-        }
-
-        input.repository.savePhaseResult({
-          sessionId: id,
-          phase: "analysis_debate",
-          resultJson: JSON.stringify(debateResult)
-        });
-
-        const questionRows: InterviewQuestionRow[] = (debateResult.synthesizedQuestions.length > 0
-          ? debateResult.synthesizedQuestions
-          : analysisResult.proposedQuestions.map((q) => ({ ...q, id: randomUUID() }))
-        ).map((q, i) => ({
-          id: q.id ?? randomUUID(),
-          sessionId: id,
-          text: q.text,
-          priority: q.priority,
-          rationale: q.rationale,
-          proposedBy: q.proposedBy,
-          answer: null,
-          sortOrder: i
-        }));
-        if (questionRows.length > 0) {
-          input.repository.saveInterviewQuestions(questionRows);
-        }
-
-        const interviewState = buildInterviewState(id);
-
-        // If no questions, skip straight to approach debate.
-        if (!interviewState.currentQuestion) {
-          return advanceToApproachDebate(id, prompt);
-        }
-
-        input.repository.updatePhase({ id, phase: "interview" });
-        input.repository.updateStatus({ id, status: "interviewing" });
-
-        const summary = {
-          currentUnderstanding: "Analysis complete. Answer the interview questions below.",
-          recommendation: interviewState.currentQuestion.text,
-          changedSinceLastCheckpoint: ["Session restarted", "Analysis complete"],
-          openRisks: [],
-          decisionsNeeded: []
-        };
-        input.repository.saveSummary({ sessionId: id, ...summary, artifactPath: null });
-
-        return {
-          session: input.repository.findById(id)!,
-          summary,
-          analysisResult: { ...analysisResult, debateSummary: debateResult.debateSummary },
-          interviewState
-        };
-      } finally {
-        lock.release();
-      }
+      return buildSessionPayload(id);
     },
 
     deleteSession(id: string) {
@@ -440,7 +576,8 @@ export function createSessionService(input: SessionServiceInput) {
 
   async function retryPhase(
     session: { id: string; title: string; status: string; phase?: string | null; prompt?: string | null },
-    humanResponse: string
+    humanResponse: string,
+    runId?: string
   ) {
     const id = session.id;
     const phase = session.phase;
@@ -453,7 +590,7 @@ export function createSessionService(input: SessionServiceInput) {
         // Re-run the full analysis + question debate
         let analysisResult;
         try {
-          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt);
+          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt, runId);
         } catch (error) {
           input.repository.updateStatus({ id, status: "errored" });
           throw error;
@@ -464,7 +601,8 @@ export function createSessionService(input: SessionServiceInput) {
           debateResult = await phaseOrchestrator.runQuestionDebate(
             id, originalPrompt,
             analysisResult.gptAnalysis, analysisResult.claudeAnalysis,
-            analysisResult.proposedQuestions
+            analysisResult.proposedQuestions,
+            runId
           );
         } catch (error) {
           input.repository.updateStatus({ id, status: "errored" });
@@ -500,7 +638,7 @@ export function createSessionService(input: SessionServiceInput) {
         const interviewState = buildInterviewState(id);
 
         if (!interviewState.currentQuestion) {
-          return advanceToApproachDebate(id, originalPrompt);
+          return advanceToApproachDebate(id, originalPrompt, runId);
         }
 
         input.repository.updatePhase({ id, phase: "interview" });
@@ -527,13 +665,13 @@ export function createSessionService(input: SessionServiceInput) {
         // Re-run the approach debate from the current interview answers.
         // Don't rewind to interview — that would save the retry text as an answer.
         input.repository.updateStatus({ id, status: "debating" });
-        return advanceToApproachDebate(id, originalPrompt);
+        return advanceToApproachDebate(id, originalPrompt, runId);
       }
 
       case "spec_generation": {
         // Re-run spec generation from the existing approach.
         input.repository.updateStatus({ id, status: "debating" });
-        return advanceToSpecGeneration(id, originalPrompt);
+        return advanceToSpecGeneration(id, originalPrompt, undefined, runId);
       }
 
       case "interview":
@@ -593,11 +731,39 @@ export function createSessionService(input: SessionServiceInput) {
         const currentQuestion = questions.find((q) => q.answer === null);
 
         if (!currentQuestion) {
-          return advanceToApproachDebate(id, originalPrompt);
+          return enqueueRun({
+            sessionId: id,
+            kind: "continue",
+            phase: "approach_debate",
+            summary: {
+              currentUnderstanding: "Interview complete. The models are now debating the best approach.",
+              recommendation: "Watch live progress while Crossfire runs the approach debate.",
+              changedSinceLastCheckpoint: ["Interview complete"],
+              openRisks: [],
+              decisionsNeeded: []
+            },
+            task: async (runId) => {
+              await advanceToApproachDebate(id, originalPrompt, runId);
+            }
+          });
         }
 
         if (humanResponse.toLowerCase().trim() === "enough") {
-          return advanceToApproachDebate(id, originalPrompt);
+          return enqueueRun({
+            sessionId: id,
+            kind: "continue",
+            phase: "approach_debate",
+            summary: {
+              currentUnderstanding: "Interview stopped early. The models are now debating the best approach.",
+              recommendation: "Watch live progress while Crossfire runs the approach debate.",
+              changedSinceLastCheckpoint: ["Interview skipped with enough"],
+              openRisks: [],
+              decisionsNeeded: []
+            },
+            task: async (runId) => {
+              await advanceToApproachDebate(id, originalPrompt, runId);
+            }
+          });
         }
 
         // Record the answer immediately — no per-question LLM evaluation.
@@ -608,7 +774,21 @@ export function createSessionService(input: SessionServiceInput) {
         const updatedState = buildInterviewState(id);
 
         if (!updatedState.currentQuestion) {
-          return advanceToApproachDebate(id, originalPrompt);
+          return enqueueRun({
+            sessionId: id,
+            kind: "continue",
+            phase: "approach_debate",
+            summary: {
+              currentUnderstanding: "Interview complete. The models are now debating the best approach.",
+              recommendation: "Watch live progress while Crossfire runs the approach debate.",
+              changedSinceLastCheckpoint: [`Answered: ${currentQuestion.text}`],
+              openRisks: [],
+              decisionsNeeded: []
+            },
+            task: async (runId) => {
+              await advanceToApproachDebate(id, originalPrompt, runId);
+            }
+          });
         }
 
         const summary = {
@@ -629,14 +809,42 @@ export function createSessionService(input: SessionServiceInput) {
       }
 
       case "approach_debate": {
-        return advanceToSpecGeneration(id, originalPrompt, humanResponse);
+        return enqueueRun({
+          sessionId: id,
+          kind: "continue",
+          phase: "spec_generation",
+          summary: {
+            currentUnderstanding: "The models are generating the specification and implementation plan.",
+            recommendation: "Watch live progress while GPT drafts and Claude reviews the spec.",
+            changedSinceLastCheckpoint: ["Approach approved"],
+            openRisks: [],
+            decisionsNeeded: []
+          },
+          task: async (runId) => {
+            await advanceToSpecGeneration(id, originalPrompt, humanResponse, runId);
+          }
+        });
       }
 
       case "spec_generation": {
         if (humanResponse.toLowerCase().trim() === "approve") {
           return finalizeSpec(id);
         }
-        return reviseSpec(id, originalPrompt, humanResponse);
+        return enqueueRun({
+          sessionId: id,
+          kind: "revise",
+          phase: "spec_generation",
+          summary: {
+            currentUnderstanding: "Revising the specification based on your feedback.",
+            recommendation: "Watch live progress while Crossfire regenerates the spec and plan.",
+            changedSinceLastCheckpoint: ["Revision requested"],
+            openRisks: [],
+            decisionsNeeded: []
+          },
+          task: async (runId) => {
+            await reviseSpec(id, originalPrompt, humanResponse, runId);
+          }
+        });
       }
 
       default:
@@ -695,7 +903,7 @@ export function createSessionService(input: SessionServiceInput) {
     };
   }
 
-  async function reviseSpec(id: string, originalPrompt: string, feedback: string) {
+  async function reviseSpec(id: string, originalPrompt: string, feedback: string, runId?: string) {
     input.repository.updateStatus({ id, status: "debating" });
 
     const questions = input.repository.findInterviewQuestions(id);
@@ -718,7 +926,7 @@ export function createSessionService(input: SessionServiceInput) {
     let specResult;
     try {
       specResult = await phaseOrchestrator.runSpecGeneration(
-        id, originalPrompt, interviewResults, approachWithFeedback
+        id, originalPrompt, interviewResults, approachWithFeedback, runId
       );
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
@@ -757,7 +965,7 @@ export function createSessionService(input: SessionServiceInput) {
     };
   }
 
-  async function advanceToApproachDebate(id: string, originalPrompt: string) {
+  async function advanceToApproachDebate(id: string, originalPrompt: string, runId?: string) {
     input.repository.updatePhase({ id, phase: "approach_debate" });
     input.repository.updateStatus({ id, status: "debating" });
 
@@ -768,7 +976,7 @@ export function createSessionService(input: SessionServiceInput) {
 
     let approachResult;
     try {
-      approachResult = await phaseOrchestrator.runApproachDebate(id, originalPrompt, interviewResults);
+      approachResult = await phaseOrchestrator.runApproachDebate(id, originalPrompt, interviewResults, runId);
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
       throw error;
@@ -805,7 +1013,7 @@ export function createSessionService(input: SessionServiceInput) {
     };
   }
 
-  async function advanceToSpecGeneration(id: string, originalPrompt: string, humanFeedback?: string) {
+  async function advanceToSpecGeneration(id: string, originalPrompt: string, humanFeedback?: string, runId?: string) {
     input.repository.updatePhase({ id, phase: "spec_generation" });
     input.repository.updateStatus({ id, status: "debating" });
 
@@ -825,7 +1033,7 @@ export function createSessionService(input: SessionServiceInput) {
     let specResult;
     try {
       specResult = await phaseOrchestrator.runSpecGeneration(
-        id, originalPrompt, interviewResults, approachResult
+        id, originalPrompt, interviewResults, approachResult, runId
       );
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });

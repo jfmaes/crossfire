@@ -16,6 +16,9 @@ interface SessionService {
   deleteSession(id: string): void;
   listSessions(): Array<{ id: string; title: string; status: string; phase?: string | null }>;
   getSession(id: string): Promise<Record<string, unknown> | null>;
+  exportSession(id: string): Record<string, unknown> | null;
+  getRun(id: string): Record<string, unknown> | null;
+  listRunEvents(runId: string): Array<Record<string, unknown>>;
 }
 
 export function buildServer(input: {
@@ -82,6 +85,7 @@ export function buildServer(input: {
   });
 
   app.get("/progress", async (request, reply) => {
+    const query = request.query as { sessionId?: string; runId?: string; token?: string };
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -91,6 +95,12 @@ export function buildServer(input: {
     reply.raw.write(":\n\n"); // SSE comment to keep connection alive
 
     const unsubscribe = onProgress((event) => {
+      if (query.runId && event.runId !== query.runId) {
+        return;
+      }
+      if (query.sessionId && event.sessionId !== query.sessionId) {
+        return;
+      }
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
     });
 

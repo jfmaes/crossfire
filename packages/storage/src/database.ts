@@ -42,6 +42,34 @@ function applySchema(db: Database.Database) {
       PRIMARY KEY (session_id, phase),
       FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
+
+    CREATE TABLE IF NOT EXISTS session_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      phase TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      error_message TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS session_run_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      model TEXT,
+      phase TEXT,
+      turn_number INTEGER,
+      elapsed_ms INTEGER,
+      disagreements INTEGER,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES session_runs(id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
   `);
 
   migrateIfNeeded(db);

@@ -55,6 +55,146 @@
           "type": "null"
         }
       ]
+    },
+    "implementationPlan": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "proposedQuestions": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "number"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "priority",
+              "rationale"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "synthesizedQuestions": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "number"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "priority",
+              "rationale"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "followUpQuestions": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "number"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "priority",
+              "rationale"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sufficientContext": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "walkthroughGaps": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              },
+              "issue": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "location",
+              "issue",
+              "fix"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -66,7 +206,13 @@
     "questionsForPeer",
     "questionsForHuman",
     "proposedSpecDelta",
-    "milestoneReached"
+    "milestoneReached",
+    "implementationPlan",
+    "proposedQuestions",
+    "synthesizedQuestions",
+    "followUpQuestions",
+    "sufficientContext",
+    "walkthroughGaps"
   ],
   "additionalProperties": false
 }

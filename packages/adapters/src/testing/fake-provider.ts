@@ -16,6 +16,12 @@ export class FakeProvider implements ProviderAdapter {
       questionsForHuman: [],
       proposedSpecDelta: `${this.name} delta`,
       milestoneReached: null,
+      implementationPlan: null,
+      proposedQuestions: null,
+      synthesizedQuestions: null,
+      followUpQuestions: null,
+      sufficientContext: null,
+      walkthroughGaps: null,
       degraded: false
     };
 

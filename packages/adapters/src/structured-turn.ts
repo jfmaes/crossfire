@@ -31,6 +31,12 @@ export function createDegradedTurn(actor: "gpt" | "claude", rawValue: unknown): 
     questionsForHuman: [],
     proposedSpecDelta: "",
     milestoneReached: null,
+    implementationPlan: null,
+    proposedQuestions: null,
+    synthesizedQuestions: null,
+    followUpQuestions: null,
+    sufficientContext: null,
+    walkthroughGaps: null,
     degraded: true
   };
 }

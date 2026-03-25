@@ -99,6 +99,8 @@ export function buildStructuredTurnPrompt(
     "- questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification.",
     "- proposedSpecDelta: concrete proposed changes to the evolving specification.",
     "- milestoneReached: set ONLY when a clear phase boundary has been passed (requirements_clarified, architecture_selected, implementation_plan_ready).",
+    "- Always include the phase-specific extension fields: implementationPlan, proposedQuestions, synthesizedQuestions, followUpQuestions, sufficientContext, walkthroughGaps.",
+    "- If a phase-specific extension field does not apply to this turn, set it to null.",
     "- newInsights: genuine new observations, not restatements.",
     "- assumptions: unstated assumptions you are making or have identified in the problem."
   ];

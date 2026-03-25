@@ -9,10 +9,11 @@ const providerTurnSchema = modelTurnSchema.omit({
 });
 
 const outputPath = path.resolve(process.cwd(), "schemas", "model-turn.schema.json");
+const jsonSchema = z.toJSONSchema(providerTurnSchema);
 
 await mkdir(path.dirname(outputPath), { recursive: true });
 await writeFile(
   outputPath,
-  JSON.stringify(z.toJSONSchema(providerTurnSchema), null, 2) + "\n",
+  JSON.stringify(jsonSchema, null, 2) + "\n",
   "utf8"
 );

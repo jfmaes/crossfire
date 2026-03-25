@@ -34,6 +34,18 @@ export const interviewQuestionSchema = z.object({
   answer: z.string().nullable()
 });
 
+const proposedQuestionSchema = z.object({
+  text: z.string(),
+  priority: z.number(),
+  rationale: z.string()
+});
+
+const walkthroughGapSchema = z.object({
+  location: z.string(),
+  issue: z.string(),
+  fix: z.string()
+});
+
 export const modelTurnSchema = z.object({
   actor: z.enum(["gpt", "claude"]),
   rawText: z.string(),
@@ -45,6 +57,12 @@ export const modelTurnSchema = z.object({
   questionsForHuman: z.array(z.string()),
   proposedSpecDelta: z.string(),
   milestoneReached: milestoneReachedSchema.nullable(),
+  implementationPlan: z.string().nullable(),
+  proposedQuestions: z.array(proposedQuestionSchema).nullable(),
+  synthesizedQuestions: z.array(proposedQuestionSchema).nullable(),
+  followUpQuestions: z.array(proposedQuestionSchema).nullable(),
+  sufficientContext: z.boolean().nullable(),
+  walkthroughGaps: z.array(walkthroughGapSchema).nullable(),
   degraded: z.boolean()
 });
 

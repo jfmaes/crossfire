@@ -15,6 +15,12 @@ function makeTurn(overrides: Partial<ModelTurn> & { actor: "gpt" | "claude" }): 
     questionsForHuman: [],
     proposedSpecDelta: "",
     milestoneReached: null,
+    implementationPlan: null,
+    proposedQuestions: null,
+    synthesizedQuestions: null,
+    followUpQuestions: null,
+    sufficientContext: null,
+    walkthroughGaps: null,
     degraded: false,
     ...overrides
   };

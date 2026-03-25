@@ -2,13 +2,27 @@ type ProgressListener = (event: ProgressEvent) => void;
 
 export interface ProgressEvent {
   sessionId: string;
-  type: "phase_start" | "model_start" | "model_done" | "phase_done" | "consensus" | "info";
+  runId?: string;
+  type: "phase_start" | "model_start" | "model_done" | "model_stream" | "phase_done" | "consensus" | "info";
   message: string;
   model?: "gpt" | "claude";
   phase?: string;
   turnNumber?: number;
   elapsedMs?: number;
   disagreements?: number;
+}
+
+export function summarizeProgressText(text: string, maxLength = 220): string {
+  const normalized = text
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 const listeners = new Set<ProgressListener>();

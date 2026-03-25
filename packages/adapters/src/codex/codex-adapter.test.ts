@@ -14,7 +14,13 @@ class FakeCodexTransport {
         questionsForPeer: [],
         questionsForHuman: [],
         proposedSpecDelta: "Add a turn-count cutoff",
-        milestoneReached: null
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null
       })
     } as const;
   }

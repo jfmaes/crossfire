@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 interface SessionFormProps {
   onCreate(prompt: string): Promise<void>;
@@ -11,6 +11,7 @@ interface SessionFormProps {
 export function SessionForm(input: SessionFormProps) {
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const label = input.label ?? "Problem statement";
   const placeholder = input.placeholder ??
@@ -32,8 +33,15 @@ export function SessionForm(input: SessionFormProps) {
     }
   }
 
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      formRef.current?.requestSubmit();
+    }
+  }
+
   return (
-    <form className="card session-form" onSubmit={handleSubmit}>
+    <form className="card session-form" onSubmit={handleSubmit} ref={formRef}>
       <label className="session-form__label" htmlFor="problem-statement">
         {label}
       </label>
@@ -43,18 +51,24 @@ export function SessionForm(input: SessionFormProps) {
         rows={5}
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
+        onKeyDown={handleKeyDown}
         placeholder={placeholder}
       />
-      <button disabled={submitting} type="submit">
-        {submitting ? (
-          <span className="btn-loading">
-            <span className="spinner" />
-            {input.loadingLabel ?? "Reasoning..."}
-          </span>
-        ) : (
-          submitLabel
-        )}
-      </button>
+      <div className="session-form__actions">
+        <button disabled={submitting} type="submit">
+          {submitting ? (
+            <span className="btn-loading">
+              <span className="spinner" />
+              {input.loadingLabel ?? "Reasoning..."}
+            </span>
+          ) : (
+            submitLabel
+          )}
+        </button>
+        <span className="session-form__hint">
+          {navigator.platform.includes("Mac") ? "\u2318" : "Ctrl"}+Enter to submit
+        </span>
+      </div>
     </form>
   );
 }

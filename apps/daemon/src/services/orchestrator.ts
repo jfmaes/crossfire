@@ -4,7 +4,7 @@ import {
 } from "@council/core";
 import type { ModelTurn } from "@council/core";
 import type { ProviderAdapter } from "@council/adapters";
-import { emitProgress } from "./progress";
+import { emitProgress, summarizeProgressText } from "./progress";
 import { debugLogPrompt, debugLogResponse } from "./debug-log";
 
 interface OrchestratorInput {
@@ -15,6 +15,7 @@ interface OrchestratorInput {
 interface RunRoundOptions {
   sessionId: string;
   prompt: string;
+  runId?: string;
   /** Maximum turns before forcing a stop. Default: 14. */
   maxTurns?: number;
 }
@@ -54,18 +55,18 @@ export function createOrchestrator(input: OrchestratorInput) {
   const providers = [input.gpt, input.claude];
 
   return {
-    async runRound({ sessionId, prompt, maxTurns = 14 }: RunRoundOptions) {
+    async runRound({ sessionId, prompt, runId, maxTurns = 14 }: RunRoundOptions) {
       let state = createSessionState();
       let peerResponse: string | undefined;
 
-      emitProgress({ sessionId, type: "info", message: `Debate: up to ${maxTurns} turns, stopping on consensus` });
+      emitProgress({ sessionId, runId, type: "info", message: `Debate: up to ${maxTurns} turns, stopping on consensus` });
 
       for (let i = 0; i < maxTurns; i++) {
         const provider = providers[i % 2];
         const turnNumber = i + 1;
         const model = provider.name.toUpperCase();
         const turnStart = Date.now();
-        emitProgress({ sessionId, type: "model_start", model: provider.name as "gpt" | "claude", turnNumber, message: `Turn ${turnNumber}...` });
+        emitProgress({ sessionId, runId, type: "model_start", model: provider.name as "gpt" | "claude", turnNumber, message: `Turn ${turnNumber}...` });
 
         const actualPrompt = peerResponse ?? prompt;
         debugLogPrompt({
@@ -84,6 +85,18 @@ export function createOrchestrator(input: OrchestratorInput) {
           turnNumber,
           totalTurns: maxTurns
         })) {
+          if (event.type === "stderr") {
+            emitProgress({
+              sessionId,
+              runId,
+              type: "model_stream",
+              model: provider.name as "gpt" | "claude",
+              turnNumber,
+              message: summarizeProgressText(event.text)
+            });
+            continue;
+          }
+
           if (event.type === "structured_turn") {
             peerResponse = event.turn.rawText || event.turn.summary;
 
@@ -100,7 +113,7 @@ export function createOrchestrator(input: OrchestratorInput) {
         const disagreementCount = latest?.disagreements.length ?? 0;
         const milestone = latest?.milestoneReached;
         const turnElapsedMs = Date.now() - turnStart;
-        emitProgress({ sessionId, type: "model_done", model: provider.name as "gpt" | "claude", turnNumber, disagreements: disagreementCount, elapsedMs: turnElapsedMs, message: `Turn ${turnNumber} done in ${turnElapsed}s — ${disagreementCount} disagreements${milestone ? `, milestone: ${milestone}` : ""}` });
+        emitProgress({ sessionId, runId, type: "model_done", model: provider.name as "gpt" | "claude", turnNumber, disagreements: disagreementCount, elapsedMs: turnElapsedMs, message: `Turn ${turnNumber} done in ${turnElapsed}s — ${disagreementCount} disagreements${milestone ? `, milestone: ${milestone}` : ""}` });
 
         if (latest) {
           debugLogResponse({
@@ -124,25 +137,25 @@ export function createOrchestrator(input: OrchestratorInput) {
 
         // Check for human questions that need escalation
         if (latest && latest.questionsForHuman.length > 0) {
-          emitProgress({ sessionId, type: "info", message: `Pausing: model has ${latest.questionsForHuman.length} questions for human` });
+          emitProgress({ sessionId, runId, type: "info", message: `Pausing: model has ${latest.questionsForHuman.length} questions for human` });
           break;
         }
 
         // Check for consensus
         if (hasReachedConsensus(state.turns)) {
-          emitProgress({ sessionId, type: "consensus", message: `Consensus reached after ${turnNumber} turns` });
+          emitProgress({ sessionId, runId, type: "consensus", message: `Consensus reached after ${turnNumber} turns` });
           break;
         }
 
         // Minimum 4 turns before stopping (give both models at least 2 exchanges)
         if (i >= 3 && disagreementCount === 0) {
-          emitProgress({ sessionId, type: "consensus", message: `No disagreements after ${turnNumber} turns — converged` });
+          emitProgress({ sessionId, runId, type: "consensus", message: `No disagreements after ${turnNumber} turns — converged` });
           break;
         }
       }
 
       if (state.exchangeCount >= maxTurns) {
-        emitProgress({ sessionId, type: "info", message: `Safety cap: stopped at ${maxTurns} turns` });
+        emitProgress({ sessionId, runId, type: "info", message: `Safety cap: stopped at ${maxTurns} turns` });
       }
 
       return { shouldCheckpoint: true, state };

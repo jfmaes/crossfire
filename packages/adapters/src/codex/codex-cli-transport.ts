@@ -86,7 +86,7 @@ export class CodexCliTransport implements CodexTransport {
   } = {}) {
     this.command = input.command ?? "codex";
     this.spawnProcess = input.spawnProcess ?? defaultSpawnProcess;
-    this.timeoutMs = input.timeoutMs ?? 600_000;
+    this.timeoutMs = input.timeoutMs ?? 1_200_000;
     this.fastMode = input.fastMode ?? false;
   }
 

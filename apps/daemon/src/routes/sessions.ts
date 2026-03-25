@@ -9,12 +9,18 @@ interface SessionService {
   listSessions(): Array<{ id: string; title: string; status: string; phase?: string | null }>;
   getSession(id: string): Promise<Record<string, unknown> | null>;
   exportSession(id: string): Record<string, unknown> | null;
+  getRun(id: string): Record<string, unknown> | null;
+  listRunEvents(runId: string): Array<Record<string, unknown>>;
 }
 
 export async function registerSessionRoutes(
   app: FastifyInstance,
   input: { sessionService?: SessionService } = {}
 ) {
+  function responseCode(payload: Record<string, unknown> | null, pendingCode: number, readyCode: number) {
+    return payload && "activeRun" in payload && payload.activeRun ? pendingCode : readyCode;
+  }
+
   app.post("/sessions", async (request, reply) => {
     if (!input.sessionService) {
       return reply.code(503).send({ error: "session service unavailable" });
@@ -30,7 +36,7 @@ export async function registerSessionRoutes(
 
     try {
       const created = await input.sessionService.createSession({ title, prompt });
-      return reply.code(201).send(created);
+      return reply.code(responseCode(created, 202, 201)).send(created);
     } catch (error) {
       request.log.error(error, "session creation failed");
       return reply.code(500).send({ error: "session creation failed" });
@@ -60,7 +66,7 @@ export async function registerSessionRoutes(
         return reply.code(404).send({ error: "not found" });
       }
 
-      return reply.code(200).send(result);
+      return reply.code(responseCode(result, 202, 200)).send(result);
     } catch (error) {
       if (error instanceof SessionConflictError) {
         return reply.code(409).send({ error: "session is already processing" });
@@ -92,10 +98,10 @@ export async function registerSessionRoutes(
         return reply.code(404).send({ error: "not found" });
       }
 
-      return reply.code(200).send(result);
+      return reply.code(202).send(result);
     } catch (error) {
       if (error instanceof SessionConflictError) {
-        return reply.code(409).send({ error: "session is already processing" });
+        return reply.code(202).send({ error: "session is already processing" });
       }
       request.log.error(error, "session restart failed");
       return reply.code(500).send({ error: "session restart failed" });
@@ -150,5 +156,35 @@ export async function registerSessionRoutes(
       .header("content-type", "application/json")
       .header("content-disposition", `attachment; filename="${fileName}"`)
       .send(data);
+  });
+
+  app.get("/runs/:id", async (request, reply) => {
+    if (!input.sessionService) {
+      return reply.code(503).send({ error: "session service unavailable" });
+    }
+
+    const params = request.params as { id: string };
+    const run = input.sessionService.getRun(params.id);
+
+    if (!run) {
+      return reply.code(404).send({ error: "not found" });
+    }
+
+    return reply.code(200).send(run);
+  });
+
+  app.get("/runs/:id/events", async (request, reply) => {
+    if (!input.sessionService) {
+      return reply.code(503).send({ error: "session service unavailable" });
+    }
+
+    const params = request.params as { id: string };
+    const run = input.sessionService.getRun(params.id);
+
+    if (!run) {
+      return reply.code(404).send({ error: "not found" });
+    }
+
+    return reply.code(200).send(input.sessionService.listRunEvents(params.id));
   });
 }

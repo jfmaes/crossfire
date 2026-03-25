@@ -17,7 +17,13 @@ class FakeClaudeProcess {
         questionsForPeer: [],
         questionsForHuman: ["Should mobile support be included in v1?"],
         proposedSpecDelta: "Include mobile web support",
-        milestoneReached: null
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null
       }),
       cliSessionId: `${input.prompt}-session`
     } as const;

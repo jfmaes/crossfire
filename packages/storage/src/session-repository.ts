@@ -25,6 +25,31 @@ export interface PhaseResultRow {
   resultJson: string;
 }
 
+export interface SessionRunRow {
+  id: string;
+  sessionId: string;
+  kind: string;
+  status: string;
+  phase?: string | null;
+  startedAt: string;
+  finishedAt?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface SessionRunEventRow {
+  id: string;
+  runId: string;
+  sessionId: string;
+  type: string;
+  message: string;
+  model?: string | null;
+  phase?: string | null;
+  turnNumber?: number | null;
+  elapsedMs?: number | null;
+  disagreements?: number | null;
+  createdAt: string;
+}
+
 interface SessionSummaryRow {
   sessionId: string;
   currentUnderstanding: string;
@@ -221,6 +246,8 @@ export class SessionRepository {
   deleteSession(id: string): void {
     this.db.prepare("DELETE FROM interview_questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM phase_results WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM session_run_events WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM session_runs WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM session_summaries WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   }
@@ -270,5 +297,168 @@ export class SessionRepository {
         WHERE session_id = ?
       `)
       .all(sessionId) as PhaseResultRow[];
+  }
+
+  createRun(run: SessionRunRow): void {
+    this.db
+      .prepare(`
+        INSERT INTO session_runs (id, session_id, kind, status, phase, started_at, finished_at, error_message)
+        VALUES (@id, @sessionId, @kind, @status, @phase, @startedAt, @finishedAt, @errorMessage)
+      `)
+      .run({
+        id: run.id,
+        sessionId: run.sessionId,
+        kind: run.kind,
+        status: run.status,
+        phase: run.phase ?? null,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt ?? null,
+        errorMessage: run.errorMessage ?? null
+      });
+  }
+
+  updateRun(input: { id: string; status: string; phase?: string | null; finishedAt?: string | null; errorMessage?: string | null }): void {
+    this.db
+      .prepare(`
+        UPDATE session_runs
+        SET
+          status = @status,
+          phase = @phase,
+          finished_at = @finishedAt,
+          error_message = @errorMessage
+        WHERE id = @id
+      `)
+      .run({
+        id: input.id,
+        status: input.status,
+        phase: input.phase ?? null,
+        finishedAt: input.finishedAt ?? null,
+        errorMessage: input.errorMessage ?? null
+      });
+  }
+
+  findActiveRun(sessionId: string): SessionRunRow | undefined {
+    return this.db
+      .prepare(`
+        SELECT
+          id,
+          session_id as sessionId,
+          kind,
+          status,
+          phase,
+          started_at as startedAt,
+          finished_at as finishedAt,
+          error_message as errorMessage
+        FROM session_runs
+        WHERE session_id = ? AND finished_at IS NULL
+        ORDER BY started_at DESC
+        LIMIT 1
+      `)
+      .get(sessionId) as SessionRunRow | undefined;
+  }
+
+  findLatestRun(sessionId: string): SessionRunRow | undefined {
+    return this.db
+      .prepare(`
+        SELECT
+          id,
+          session_id as sessionId,
+          kind,
+          status,
+          phase,
+          started_at as startedAt,
+          finished_at as finishedAt,
+          error_message as errorMessage
+        FROM session_runs
+        WHERE session_id = ?
+        ORDER BY started_at DESC
+        LIMIT 1
+      `)
+      .get(sessionId) as SessionRunRow | undefined;
+  }
+
+  findRunById(id: string): SessionRunRow | undefined {
+    return this.db
+      .prepare(`
+        SELECT
+          id,
+          session_id as sessionId,
+          kind,
+          status,
+          phase,
+          started_at as startedAt,
+          finished_at as finishedAt,
+          error_message as errorMessage
+        FROM session_runs
+        WHERE id = ?
+      `)
+      .get(id) as SessionRunRow | undefined;
+  }
+
+  findRunsBySession(sessionId: string, limit = 10): SessionRunRow[] {
+    return this.db
+      .prepare(`
+        SELECT
+          id,
+          session_id as sessionId,
+          kind,
+          status,
+          phase,
+          started_at as startedAt,
+          finished_at as finishedAt,
+          error_message as errorMessage
+        FROM session_runs
+        WHERE session_id = ?
+        ORDER BY started_at DESC
+        LIMIT ?
+      `)
+      .all(sessionId, limit) as SessionRunRow[];
+  }
+
+  saveRunEvent(event: SessionRunEventRow): void {
+    this.db
+      .prepare(`
+        INSERT INTO session_run_events (
+          id, run_id, session_id, type, message, model, phase, turn_number, elapsed_ms, disagreements, created_at
+        ) VALUES (
+          @id, @runId, @sessionId, @type, @message, @model, @phase, @turnNumber, @elapsedMs, @disagreements, @createdAt
+        )
+      `)
+      .run({
+        id: event.id,
+        runId: event.runId,
+        sessionId: event.sessionId,
+        type: event.type,
+        message: event.message,
+        model: event.model ?? null,
+        phase: event.phase ?? null,
+        turnNumber: event.turnNumber ?? null,
+        elapsedMs: event.elapsedMs ?? null,
+        disagreements: event.disagreements ?? null,
+        createdAt: event.createdAt
+      });
+  }
+
+  findRunEvents(runId: string, limit = 100): SessionRunEventRow[] {
+    return this.db
+      .prepare(`
+        SELECT
+          id,
+          run_id as runId,
+          session_id as sessionId,
+          type,
+          message,
+          model,
+          phase,
+          turn_number as turnNumber,
+          elapsed_ms as elapsedMs,
+          disagreements,
+          created_at as createdAt
+        FROM session_run_events
+        WHERE run_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+      `)
+      .all(runId, limit) as SessionRunEventRow[];
   }
 }
