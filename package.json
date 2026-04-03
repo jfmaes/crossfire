@@ -3,6 +3,9 @@
   "private": true,
   "packageManager": "pnpm@10.0.0",
   "scripts": {
+    "start": "tsx scripts/start.ts",
+    "dev": "tsx scripts/start.ts",
+    "start:verbose": "tsx scripts/start.ts --verbose",
     "build": "pnpm --filter @council/daemon build && pnpm --filter @council/web build",
     "dev:web": "pnpm --filter @council/web dev",
     "dev:daemon": "pnpm --filter @council/daemon dev",
@@ -17,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
