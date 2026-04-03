@@ -51,12 +51,20 @@ function pipeChild(child: ChildProcess, label: string) {
   }
 }
 
-function waitForHealth(url: string, timeoutMs: number): Promise<void> {
+function waitForHealth(
+  url: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
   const start = Date.now();
   const interval = 250;
 
   return new Promise<void>((resolve, reject) => {
     function poll() {
+      if (signal?.aborted) {
+        reject(new Error("Daemon process exited before becoming healthy"));
+        return;
+      }
       if (Date.now() - start >= timeoutMs) {
         reject(
           new Error(
@@ -66,14 +74,18 @@ function waitForHealth(url: string, timeoutMs: number): Promise<void> {
         return;
       }
 
-      const req = http.get(url, (res) => {
-        res.resume(); // drain
-        if (res.statusCode === 200) {
-          resolve();
-        } else {
-          setTimeout(poll, interval);
-        }
-      });
+      const req = http.get(
+        url,
+        { headers: { "x-council-token": token } },
+        (res) => {
+          res.resume(); // drain
+          if (res.statusCode === 200) {
+            resolve();
+          } else {
+            setTimeout(poll, interval);
+          }
+        },
+      );
       req.on("error", () => {
         setTimeout(poll, interval);
       });
@@ -91,19 +103,24 @@ function waitForHealth(url: string, timeoutMs: number): Promise<void> {
 // State
 // ---------------------------------------------------------------------------
 
-let daemon: ChildProcess;
-let web: ChildProcess;
+let daemon: ChildProcess | undefined;
+let web: ChildProcess | undefined;
 let shuttingDown = false;
 
 function shutdown(code: number = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  daemon?.kill();
-  web?.kill();
+  const children = [daemon, web].filter(Boolean) as ChildProcess[];
+  for (const child of children) child.kill("SIGTERM");
 
-  // Give children a moment to exit, then force-quit.
-  setTimeout(() => process.exit(code), 500);
+  // Escalate to SIGKILL if children don't exit, then force-quit.
+  setTimeout(() => {
+    for (const child of children) {
+      if (!child.killed) child.kill("SIGKILL");
+    }
+    process.exit(code);
+  }, 2000);
 }
 
 process.on("SIGINT", () => shutdown(0));
@@ -115,15 +132,23 @@ process.on("SIGTERM", () => shutdown(0));
 
 async function main() {
   // 2. Spawn daemon
-  daemon = spawn("npx", ["tsx", "apps/daemon/src/main.ts"], {
-    env: { ...process.env },
+  daemon = spawn("tsx", ["apps/daemon/src/main.ts"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   pipeChild(daemon, "daemon");
 
+  daemon.on("error", (err) => {
+    console.error(`[daemon] failed to start: ${err.message}`);
+    shutdown(1);
+  });
+
+  // Abort the health check poll if the daemon exits early.
+  const healthAbort = new AbortController();
+
   daemon.on("exit", (code) => {
     if (!shuttingDown) {
+      healthAbort.abort();
       console.error(`[daemon] exited unexpectedly with code ${code}`);
       shutdown(code ?? 1);
     }
@@ -131,7 +156,11 @@ async function main() {
 
   // 3. Poll health check
   try {
-    await waitForHealth("http://127.0.0.1:8787/health", 15_000);
+    await waitForHealth(
+      "http://127.0.0.1:8787/health",
+      15_000,
+      healthAbort.signal,
+    );
   } catch (err) {
     console.error(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
@@ -142,11 +171,15 @@ async function main() {
 
   // 4. Spawn Vite dev server
   web = spawn("pnpm", ["dev:web"], {
-    env: { ...process.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   pipeChild(web, "web");
+
+  web.on("error", (err) => {
+    console.error(`[web] failed to start: ${err.message}`);
+    shutdown(1);
+  });
 
   web.on("exit", (code) => {
     if (!shuttingDown) {
