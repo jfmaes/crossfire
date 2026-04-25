@@ -9,7 +9,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function createPhaseAwareProvider(name: "gpt" | "claude"): ProviderAdapter {
   return {
     name,
-    async *sendTurn(_input: ProviderTurnInput) {
+    async *sendTurn(input: ProviderTurnInput) {
       const turn: ModelTurn = {
         actor: name,
         rawText: `${name} analysis response`,
@@ -18,18 +18,32 @@ function createPhaseAwareProvider(name: "gpt" | "claude"): ProviderAdapter {
         assumptions: [],
         disagreements: [],
         questionsForPeer: [],
-        questionsForHuman: [`What is the target platform?`],
-        proposedSpecDelta: "",
-        milestoneReached: null,
-        implementationPlan: null,
-        proposedQuestions: null,
-        synthesizedQuestions: null,
+        questionsForHuman: input.phase === "analysis" ? [`What is the target platform?`] : [],
+        proposedSpecDelta: input.phase === "spec_generation" ? `${name} spec` : "",
+        milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+        implementationPlan: input.phase === "spec_generation" ? `${name} implementation plan` : null,
+        proposedQuestions: input.phase === "analysis" ? [{
+          text: "What is the target platform?",
+          priority: 1,
+          rationale: "Need scope",
+          context: "In plain English, this decides where the first release must actually run.",
+          recommendation: "Start with web only.",
+          recommendationReasoning: "That keeps the first brownfield rollout smaller and easier to validate."
+        }] : null,
+        synthesizedQuestions: input.phase === "analysis_debate" ? [{
+          text: "What is the target platform?",
+          priority: 1,
+          rationale: "Need scope",
+          context: "In plain English, this decides where the first release must actually run.",
+          recommendation: "Start with web only.",
+          recommendationReasoning: "That keeps the first brownfield rollout smaller and easier to validate."
+        }] : null,
         followUpQuestions: null,
         sufficientContext: null,
-        walkthroughGaps: null,
+        walkthroughGaps: input.phase === "walkthrough" ? [] : null,
         degraded: false
       };
-      yield { type: "structured_turn", actor: name, turn } as const;
+      yield { type: "structured_turn", actor: name, turn, rawResponse: JSON.stringify(turn) } as const;
       yield { type: "done" } as const;
     },
     async healthCheck() {
@@ -100,6 +114,24 @@ describe("session-service spec-driven lifecycle", () => {
 
     const settled = await waitForSettledSession(service, created.session.id);
     expect(settled.session.phase).toBe("approach_debate");
+  });
+
+  it("accepts the Crossfire recommendation as the interview answer", async () => {
+    const service = createService();
+
+    const created = await service.createSession({
+      title: "Spec",
+      prompt: "Build an app"
+    });
+
+    await waitForSettledSession(service, created.session.id);
+    const continued = await service.continueSession({
+      id: created.session.id,
+      humanResponse: "let crossfire decide"
+    });
+
+    expect(continued?.interviewState?.answeredCount).toBe(1);
+    expect(continued?.interviewState?.questions[0].answer).toBe("Start with web only.");
   });
 
   it("transitions from approach_debate to spec_generation on continue", async () => {

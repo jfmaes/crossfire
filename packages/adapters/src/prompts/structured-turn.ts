@@ -14,7 +14,7 @@ export const ANTI_SYCOPHANCY = [
   "- Agreement must be EARNED through evidence, not assumed as default.",
   "- If you change your position, state the SPECIFIC argument that changed your mind. Vague acknowledgments like 'you raise a good point' are prohibited.",
   "- You will NOT be penalized for disagreement. You WILL be penalized for agreeing with flawed reasoning.",
-  "- Treat your peer's output with the same skepticism you would apply to a junior engineer's first draft."
+  "- Treat your peer's output with professional skepticism. Critique the reasoning directly, not the person."
 ].join("\n");
 
 export const GPT_PERSONA = [
@@ -32,6 +32,20 @@ export const CLAUDE_PERSONA = [
   "You consider it a professional failure if a real flaw ships because you were too polite to flag it.",
   "Your professional reputation depends on thoroughness, not collegiality."
 ].join(" ");
+
+const STRUCTURED_TURN_RESPONSE_SHAPE = [
+  "{",
+  '  "rawText": "full human-readable reasoning",',
+  '  "summary": "single-paragraph summary",',
+  '  "newInsights": ["new observation"],',
+  '  "assumptions": ["unstated assumption"],',
+  '  "disagreements": ["specific unresolved disagreement"],',
+  '  "questionsForPeer": ["question for peer"],',
+  '  "questionsForHuman": ["question for human only if truly blocked"],',
+  '  "proposedSpecDelta": "concrete spec delta",',
+  '  "milestoneReached": null',
+  "}"
+].join("\n");
 
 function getPhaseInstructions(turnNumber: number, totalTurns: number, hasPeer: boolean): string {
   if (!hasPeer) {
@@ -81,29 +95,57 @@ export function buildStructuredTurnPrompt(
   const persona = rich.role === "gpt" ? GPT_PERSONA : CLAUDE_PERSONA;
   const hasPeer = !!rich.peerResponse;
   const phase = getPhaseInstructions(rich.turnNumber, rich.totalTurns, hasPeer);
+  const compactReminder = [
+    `Continue as ${rich.role === "gpt" ? "Dr. Chen." : "Dr. Rivera."}`,
+    "INDEPENDENCE PROTOCOL remains in force: agreement must be earned through evidence.",
+    "Treat your peer's latest response with the same skepticism as their first."
+  ].join("\n");
 
-  const sections = [
-    persona,
-    "",
-    ANTI_SYCOPHANCY,
-    "",
-    phase,
-    "",
-    "OUTPUT RULES:",
-    "- Respond ONLY with a JSON object matching the provided schema.",
-    "- Put your full human-readable reasoning (including critique, defense, and evidence) into rawText.",
-    "- Write a concise single-paragraph summary in the summary field.",
-    hasPeer
-      ? "- disagreements: list SPECIFIC points where you disagree with your peer, with reasoning. Do not leave empty if you have genuine concerns."
-      : "- disagreements: leave as an EMPTY array — there is no peer to disagree with yet. Put concerns and risks in newInsights instead.",
-    "- questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification.",
-    "- proposedSpecDelta: concrete proposed changes to the evolving specification.",
-    "- milestoneReached: set ONLY when a clear phase boundary has been passed (requirements_clarified, architecture_selected, implementation_plan_ready).",
-    "- Always include the phase-specific extension fields: implementationPlan, proposedQuestions, synthesizedQuestions, followUpQuestions, sufficientContext, walkthroughGaps.",
-    "- If a phase-specific extension field does not apply to this turn, set it to null.",
-    "- newInsights: genuine new observations, not restatements.",
-    "- assumptions: unstated assumptions you are making or have identified in the problem."
-  ];
+  const sections = rich.omitContext
+    ? [
+        compactReminder,
+        "",
+        phase,
+        "",
+        "OUTPUT RULES:",
+        "- Respond ONLY with a single raw JSON object. No markdown fences. No prose before or after the JSON.",
+        "- The object must match this exact response shape:",
+        STRUCTURED_TURN_RESPONSE_SHAPE,
+        "- Put your full human-readable reasoning (including critique, defense, and evidence) into rawText.",
+        "- Write a concise single-paragraph summary in the summary field.",
+        hasPeer
+          ? "- disagreements: list SPECIFIC points where you disagree with your peer, with reasoning. Do not leave empty if you have genuine concerns."
+          : "- disagreements: leave as an EMPTY array — there is no peer to disagree with yet. Put concerns and risks in newInsights instead.",
+        "- The debate only ends when BOTH you and your peer independently reach zero disagreements. Do not treat a milestone or temporary silence as consensus by itself.",
+        "- questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification.",
+        "- proposedSpecDelta: concrete proposed changes to the evolving specification.",
+        "- milestoneReached: set ONLY when a clear phase boundary has been passed (requirements_clarified, architecture_selected, implementation_plan_ready).",
+        "- newInsights: genuine new observations, not restatements.",
+        "- assumptions: unstated assumptions you are making or have identified in the problem."
+      ]
+    : [
+        persona,
+        "",
+        ANTI_SYCOPHANCY,
+        "",
+        phase,
+        "",
+        "OUTPUT RULES:",
+        "- Respond ONLY with a single raw JSON object. No markdown fences. No prose before or after the JSON.",
+        "- The object must match this exact response shape:",
+        STRUCTURED_TURN_RESPONSE_SHAPE,
+        "- Put your full human-readable reasoning (including critique, defense, and evidence) into rawText.",
+        "- Write a concise single-paragraph summary in the summary field.",
+        hasPeer
+          ? "- disagreements: list SPECIFIC points where you disagree with your peer, with reasoning. Do not leave empty if you have genuine concerns."
+          : "- disagreements: leave as an EMPTY array — there is no peer to disagree with yet. Put concerns and risks in newInsights instead.",
+        "- The debate only ends when BOTH you and your peer independently reach zero disagreements. Do not treat a milestone or temporary silence as consensus by itself.",
+        "- questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification.",
+        "- proposedSpecDelta: concrete proposed changes to the evolving specification.",
+        "- milestoneReached: set ONLY when a clear phase boundary has been passed (requirements_clarified, architecture_selected, implementation_plan_ready).",
+        "- newInsights: genuine new observations, not restatements.",
+        "- assumptions: unstated assumptions you are making or have identified in the problem."
+      ];
 
   if (!rich.omitContext) {
     sections.push(

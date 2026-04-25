@@ -4,9 +4,11 @@ import type { InterviewState } from "../lib/api";
 interface InterviewCardProps {
   state: InterviewState;
   evaluation?: string | null;
+  onUseRecommendation?: (answer: string) => void;
+  recommendationPending?: boolean;
 }
 
-export function InterviewCard({ state, evaluation }: InterviewCardProps) {
+export function InterviewCard({ state, evaluation, onUseRecommendation, recommendationPending = false }: InterviewCardProps) {
   const { questions, currentQuestion, totalQuestions, answeredCount } = state;
   const answered = questions.filter((q) => q.answer !== null);
   const progressPct = totalQuestions > 0 ? (answeredCount / totalQuestions) * 100 : 0;
@@ -42,6 +44,33 @@ export function InterviewCard({ state, evaluation }: InterviewCardProps) {
           <h3>Question {answeredCount + 1} of {totalQuestions}</h3>
           <p className="interview-question-text">{currentQuestion.text}</p>
           <p className="interview-question-rationale">{currentQuestion.rationale}</p>
+          {currentQuestion.context && (
+            <div className="interview-question-detail">
+              <h4>What this means in practice</h4>
+              <p>{currentQuestion.context}</p>
+            </div>
+          )}
+          {currentQuestion.recommendation && (
+            <div className="interview-question-detail interview-question-detail--recommendation">
+              <h4>Crossfire recommendation</h4>
+              <p>{currentQuestion.recommendation}</p>
+              {currentQuestion.recommendationReasoning && (
+                <p className="interview-question-recommendation-reasoning">
+                  {currentQuestion.recommendationReasoning}
+                </p>
+              )}
+              {onUseRecommendation && (
+                <button
+                  type="button"
+                  className="interview-question-action"
+                  onClick={() => onUseRecommendation(currentQuestion.recommendation!)}
+                  disabled={recommendationPending}
+                >
+                  {recommendationPending ? "Using recommendation…" : "Use Crossfire recommendation"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 

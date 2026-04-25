@@ -1,22 +1,22 @@
 import type { ProviderAdapter, ProviderTurnInput } from "../base/provider-adapter";
 import { buildStructuredTurnPrompt } from "../prompts/structured-turn";
-import { parseStructuredTurn } from "../structured-turn";
+import { detectProviderFailureText, parseStructuredTurn } from "../structured-turn";
 import type { ClaudeProcess } from "./claude-process";
 
 export class ClaudeAdapter implements ProviderAdapter {
   readonly name = "claude";
 
   /**
-   * Tracks Claude CLI session IDs for conversation resumption within a single
-   * phase context.
+   * Tracks Claude CLI session IDs only for the unphased approach-debate path.
    *
-   * Key: "sessionId:phaseKey", Value: Claude CLI session_id.
-   *
-   * Reusing one Claude conversation across different prompt shapes causes
-   * phase bleed, especially on spec generation where Claude can stall and
-   * return no output. Starting fresh on phase boundaries keeps the prompt
-   * contract stable while still allowing reuse within repeated turns of the
-   * same phase.
+   * Crossfire's hard reuse policy is broader than this cache and is enforced
+   * by orchestration before another resumed turn is attempted: same provider
+   * (implicit here because this cache is Claude-only), same phase family,
+   * same behavioral contract, same response-schema expectations, a confirmed
+   * Claude resume path, and a previous turn that was neither degraded nor
+   * phase-invalid. In this pass, the only Claude path that satisfies those
+   * gates is the unphased approach debate; every phase-specific prompt starts
+   * from fresh context.
    */
   private readonly cliSessions = new Map<string, string>();
 
@@ -25,10 +25,8 @@ export class ClaudeAdapter implements ProviderAdapter {
   async *sendTurn(input: ProviderTurnInput) {
     yield { type: "status", value: "started" } as const;
 
-    const phaseKey = input.phase ?? "debate";
-    const sessionKey = `${input.sessionId}:${phaseKey}`;
-    const isAnalysis = phaseKey === "analysis";
-    const resumeSessionId = isAnalysis ? undefined : this.cliSessions.get(sessionKey);
+    const debateKey = `${input.sessionId}:debate`;
+    const resumeSessionId = input.phase ? undefined : this.cliSessions.get(debateKey);
     const canOmitContext = !!resumeSessionId;
 
     const prompt = input.phase
@@ -58,14 +56,25 @@ export class ClaudeAdapter implements ProviderAdapter {
       }
 
       // Capture CLI session ID for future resumption
-      if (event.cliSessionId) {
-        this.cliSessions.set(sessionKey, event.cliSessionId);
+      if (event.cliSessionId && !input.phase) {
+        this.cliSessions.set(debateKey, event.cliSessionId);
+      }
+
+      const turn = parseStructuredTurn("claude", event.text);
+      if (turn.degraded) {
+        const providerFailure = detectProviderFailureText(event.text);
+        if (providerFailure) {
+          yield { type: "error", message: providerFailure } as const;
+          continue;
+        }
       }
 
       yield {
         type: "structured_turn",
         actor: "claude",
-        turn: parseStructuredTurn("claude", event.text)
+        turn,
+        rawResponse: event.text,
+        conversationReused: canOmitContext
       } as const;
     }
 
@@ -73,12 +82,7 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   clearSession(sessionId: string) {
-    const prefix = `${sessionId}:`;
-    for (const key of this.cliSessions.keys()) {
-      if (key.startsWith(prefix)) {
-        this.cliSessions.delete(key);
-      }
-    }
+    this.cliSessions.delete(`${sessionId}:debate`);
   }
 
   healthCheck() {

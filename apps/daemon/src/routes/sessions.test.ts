@@ -26,6 +26,9 @@ const fakeService = {
   async restartSession() {
     return fakeSession;
   },
+  async rewindSession() {
+    return fakeSession;
+  },
   deleteSession() {},
   listSessions() {
     return [{ id: "sess_1", title: "New session", status: "checkpoint", phase: "analysis" }];
@@ -76,6 +79,38 @@ describe("session routes", () => {
 
     expect(response.statusCode).toBe(201);
     expect(response.json().summary.recommendation).toBe("Proceed with the daemon-backed loop.");
+    await app.close();
+  });
+
+  it("caps requested approach debate turns to a bounded value", async () => {
+    let capturedPolicy: { approachDebateMaxTurns?: number } | undefined;
+    const service = {
+      ...fakeService,
+      async createSession(input: { executionPolicy?: { approachDebateMaxTurns?: number } }) {
+        capturedPolicy = input.executionPolicy;
+        return fakeSession;
+      }
+    };
+    const app = buildServer({
+      accessToken: "secret-token",
+      sessionService: service
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions",
+      headers: { "x-council-token": "secret-token" },
+      payload: {
+        title: "New session",
+        prompt: "Help me spec a local app",
+        executionPolicy: {
+          approachDebateMaxTurns: 999
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(capturedPolicy?.approachDebateMaxTurns).toBe(30);
     await app.close();
   });
 
@@ -163,6 +198,23 @@ describe("session routes", () => {
     });
 
     expect(response.statusCode).toBe(202);
+    expect(response.json().session.id).toBe("sess_1");
+    await app.close();
+  });
+
+  it("rewinds a session to the previous phase", async () => {
+    const app = buildServer({
+      accessToken: "secret-token",
+      sessionService: fakeService
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions/sess_1/rewind",
+      headers: { "x-council-token": "secret-token" }
+    });
+
+    expect(response.statusCode).toBe(200);
     expect(response.json().session.id).toBe("sess_1");
     await app.close();
   });

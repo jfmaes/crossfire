@@ -13,7 +13,7 @@ services:
       - ~/.codex:/root/.codex:ro
       - ~/.config/claude-code:/root/.config/claude-code:ro
     environment:
-      - COUNCIL_ACCESS_TOKEN=${COUNCIL_ACCESS_TOKEN:-local-dev-token}
+      - COUNCIL_ACCESS_TOKEN=${COUNCIL_ACCESS_TOKEN:?Set COUNCIL_ACCESS_TOKEN before running docker compose}
       - COUNCIL_DATABASE_PATH=data/council.sqlite
       # Daemon defaults to 127.0.0.1; inside Docker it must listen on all interfaces
       # so the nginx container can reach it.

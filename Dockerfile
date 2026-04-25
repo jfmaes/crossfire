@@ -34,6 +34,7 @@ WORKDIR /app
 COPY --from=base /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
 COPY --from=base /app/node_modules ./node_modules
 COPY --from=base /app/packages ./packages
+COPY --from=base /app/apps/daemon/src ./apps/daemon/src
 COPY --from=base /app/apps/daemon/dist ./apps/daemon/dist
 COPY --from=base /app/apps/daemon/package.json ./apps/daemon/
 COPY --from=base /app/apps/daemon/node_modules ./apps/daemon/node_modules

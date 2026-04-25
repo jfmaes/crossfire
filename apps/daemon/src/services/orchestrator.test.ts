@@ -30,7 +30,28 @@ function singleTurnProvider(turn: ModelTurn): ProviderAdapter {
   return {
     name: turn.actor,
     async *sendTurn(_input: ProviderTurnInput) {
-      yield { type: "structured_turn", actor: turn.actor, turn } as const;
+      yield { type: "structured_turn", actor: turn.actor, turn, rawResponse: JSON.stringify(turn) } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+}
+
+function invalidStructuredTurnProvider(
+  actor: "gpt" | "claude",
+  rawTurn: Record<string, unknown>
+): ProviderAdapter {
+  return {
+    name: actor,
+    async *sendTurn(_input: ProviderTurnInput) {
+      yield {
+        type: "structured_turn",
+        actor,
+        turn: rawTurn as ModelTurn,
+        rawResponse: JSON.stringify(rawTurn)
+      } as const;
       yield { type: "done" } as const;
     },
     async healthCheck() {
@@ -52,7 +73,23 @@ describe("orchestrator", () => {
     });
 
     expect(result.shouldCheckpoint).toBe(true);
-    // Both models have 0 disagreements → consensus after 4 turns (minimum 2 full exchanges)
+    expect(result.stopReason).toBe("consensus");
+    expect(result.state.turns).toHaveLength(4);
+  });
+
+  it("preserves consensus when it happens on the final allowed turn", async () => {
+    const orchestrator = createOrchestrator({
+      gpt: new FakeProvider("gpt"),
+      claude: new FakeProvider("claude")
+    });
+
+    const result = await orchestrator.runRound({
+      sessionId: "sess_1",
+      prompt: "Spec a local collaboration tool",
+      maxTurns: 4
+    });
+
+    expect(result.stopReason).toBe("consensus");
     expect(result.state.turns).toHaveLength(4);
   });
 
@@ -71,13 +108,11 @@ describe("orchestrator", () => {
     });
 
     expect(result.shouldCheckpoint).toBe(true);
+    expect(result.stopReason).toBe("questions_for_human");
     expect(result.state.turns).toHaveLength(1);
   });
 
-  it("keeps debating while one model has disagreements", async () => {
-    // GPT always disagrees, Claude never does.
-    // The debate continues because the last two turns aren't both clean.
-    // After turn 4 (Claude), i>=3 and Claude's disagreementCount===0 triggers early exit.
+  it("does not stop early when only the latest turn is clean", async () => {
     const orchestrator = createOrchestrator({
       gpt: singleTurnProvider(makeTurn({
         actor: "gpt",
@@ -89,13 +124,14 @@ describe("orchestrator", () => {
     const result = await orchestrator.runRound({
       sessionId: "sess_1",
       prompt: "Design a caching layer",
-      maxTurns: 14
+      maxTurns: 4
     });
 
     expect(result.shouldCheckpoint).toBe(true);
-    // Runs past 2 turns because GPT keeps disagreeing
-    expect(result.state.turns.length).toBeGreaterThan(2);
-    expect(result.state.turns[0].disagreements).toHaveLength(1);
+    expect(result.stopReason).toBe("max_turns");
+    expect(result.state.turns).toHaveLength(4);
+    expect(result.state.turns.at(-1)?.disagreements).toEqual([]);
+    expect(result.state.turns.at(-2)?.disagreements).toHaveLength(1);
   });
 
   it("hits safety cap when both models keep disagreeing", async () => {
@@ -117,28 +153,30 @@ describe("orchestrator", () => {
     });
 
     expect(result.shouldCheckpoint).toBe(true);
+    expect(result.stopReason).toBe("max_turns");
     expect(result.state.turns).toHaveLength(6);
   });
 
-  it("stops on milestone reached", async () => {
+  it("throws when an approach debate turn omits milestoneReached", async () => {
     const orchestrator = createOrchestrator({
-      gpt: singleTurnProvider(makeTurn({
+      gpt: invalidStructuredTurnProvider("gpt", {
         actor: "gpt",
-        milestoneReached: "requirements_clarified"
-      })),
+        rawText: "I agree with the current direction.",
+        summary: "Agreement",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "Ship the simpler architecture."
+      }),
       claude: new FakeProvider("claude")
     });
 
-    const result = await orchestrator.runRound({
+    await expect(orchestrator.runRound({
       sessionId: "sess_1",
       prompt: "Clarify requirements"
-    });
-
-    expect(result.shouldCheckpoint).toBe(true);
-    // Milestone requires at least 2 turns before it can trigger consensus
-    // GPT turn 1 (milestone), Claude turn 2 (clean), GPT turn 3 (milestone) → consensus at 3
-    expect(result.state.turns.length).toBeGreaterThanOrEqual(2);
-    expect(result.state.turns[0].milestoneReached).toBe("requirements_clarified");
+    })).rejects.toThrow("GPT approach_debate failed on turn 1: missing required fields: milestoneReached");
   });
 
   it("passes original problem and peer context through turns", async () => {
@@ -151,7 +189,8 @@ describe("orchestrator", () => {
         yield {
           type: "structured_turn",
           actor: "gpt",
-          turn: makeTurn({ actor: "gpt", rawText: "gpt analysis" })
+          turn: makeTurn({ actor: "gpt", rawText: "gpt analysis" }),
+          rawResponse: JSON.stringify(makeTurn({ actor: "gpt", rawText: "gpt analysis" }))
         } as const;
         yield { type: "done" } as const;
       },
@@ -175,5 +214,29 @@ describe("orchestrator", () => {
     expect(capturedInputs[0].originalProblem).toBe("Original problem statement");
     expect(capturedInputs[0].turnNumber).toBe(1);
     expect(capturedInputs[0].peerResponse).toBeUndefined();
+  });
+
+  it("throws when a provider emits an error instead of a structured turn", async () => {
+    const failingProvider: ProviderAdapter = {
+      name: "gpt",
+      async *sendTurn(_input: ProviderTurnInput) {
+        yield { type: "stderr", text: "worker quit with fatal" } as const;
+        yield { type: "error", message: "Transport channel closed" } as const;
+        yield { type: "done" } as const;
+      },
+      async healthCheck() {
+        return { ok: true, detail: "ready" };
+      }
+    };
+
+    const orchestrator = createOrchestrator({
+      gpt: failingProvider,
+      claude: new FakeProvider("claude")
+    });
+
+    await expect(orchestrator.runRound({
+      sessionId: "sess_1",
+      prompt: "Spec a local collaboration tool"
+    })).rejects.toThrow("GPT approach_debate failed on turn 1: Transport channel closed");
   });
 });

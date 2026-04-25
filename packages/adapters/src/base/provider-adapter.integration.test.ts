@@ -37,7 +37,26 @@ describe("ProviderAdapter streaming contract", () => {
           sufficientContext: null,
           walkthroughGaps: null,
           degraded: false
-        }
+        },
+        rawResponse: JSON.stringify({
+          actor: "gpt",
+          rawText: "gpt raw response",
+          summary: "gpt response",
+          newInsights: ["gpt insight"],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: "gpt delta",
+          milestoneReached: null,
+          implementationPlan: null,
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: null,
+          degraded: false
+        })
       },
       { type: "done" }
     ]);

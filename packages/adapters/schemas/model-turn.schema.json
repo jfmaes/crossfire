@@ -81,12 +81,45 @@
               },
               "rationale": {
                 "type": "string"
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendationReasoning": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "text",
               "priority",
-              "rationale"
+              "rationale",
+              "context",
+              "recommendation",
+              "recommendationReasoning"
             ],
             "additionalProperties": false
           }
@@ -111,12 +144,45 @@
               },
               "rationale": {
                 "type": "string"
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendationReasoning": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "text",
               "priority",
-              "rationale"
+              "rationale",
+              "context",
+              "recommendation",
+              "recommendationReasoning"
             ],
             "additionalProperties": false
           }
@@ -141,12 +207,45 @@
               },
               "rationale": {
                 "type": "string"
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recommendationReasoning": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "text",
               "priority",
-              "rationale"
+              "rationale",
+              "context",
+              "recommendation",
+              "recommendationReasoning"
             ],
             "additionalProperties": false
           }

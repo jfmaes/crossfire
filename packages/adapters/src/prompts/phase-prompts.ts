@@ -1,11 +1,4 @@
-import type { InterviewQuestion, SessionPhase } from "@council/core";
 import { GPT_PERSONA, CLAUDE_PERSONA, ANTI_SYCOPHANCY } from "./structured-turn";
-
-export interface PhasePromptContext {
-  role: "gpt" | "claude";
-  originalProblem: string;
-  phase: SessionPhase;
-}
 
 function getPersona(role: "gpt" | "claude"): string {
   return role === "gpt" ? GPT_PERSONA : CLAUDE_PERSONA;
@@ -27,29 +20,26 @@ export function buildAnalysisPrompt(input: {
     `Analyze the following problem and produce:`,
     `1. A thorough breakdown of what this problem entails — be specific about what could go wrong`,
     `2. Up to 5 critical questions the human MUST answer before design can begin (fewer is better — only ask what's truly necessary)`,
-    `3. For each question, rank its priority (1 = highest) and explain WHY the answer matters`,
+    `3. For each question, explain it in plain human language, not builder jargon`,
+    `4. For each question, give your current best recommendation so the human can either decide for themselves or let Crossfire decide`,
     "",
     `Respond ONLY with a JSON object matching this schema:`,
     `{`,
-    `  "actor": "${input.role}",`,
     `  "rawText": "your full analysis as readable text",`,
     `  "summary": "one paragraph summary",`,
     `  "newInsights": ["insight1", ...],`,
     `  "assumptions": ["assumption1", ...],`,
-    `  "disagreements": [],`,
-    `  "questionsForPeer": [],`,
     `  "questionsForHuman": ["question1", ...],`,
-    `  "proposedSpecDelta": "",`,
-    `  "milestoneReached": null,`,
-    `  "implementationPlan": null,`,
     `  "proposedQuestions": [`,
-    `    { "text": "question", "priority": 1, "rationale": "why this matters" }`,
-    `  ],`,
-    `  "synthesizedQuestions": null,`,
-    `  "followUpQuestions": null,`,
-    `  "sufficientContext": null,`,
-    `  "walkthroughGaps": null,`,
-    `  "degraded": false,`,
+    `    {`,
+    `      "text": "question in plain human language",`,
+    `      "priority": 1,`,
+    `      "rationale": "why this decision matters to the design",`,
+    `      "context": "what this means in practice, in plain English",`,
+    `      "recommendation": "Crossfire's best current recommendation",`,
+    `      "recommendationReasoning": "why this is the current best recommendation and when it might change"`,
+    `    }`,
+    `  ]`,
     `}`,
     "",
     `---`,
@@ -69,13 +59,27 @@ export function buildQuestionDebatePrompt(input: {
   originalProblem: string;
   gptAnalysis: string;
   claudeAnalysis: string;
-  allQuestions: Array<{ text: string; priority: number; rationale: string; proposedBy: string }>;
+  allQuestions: Array<{
+    text: string;
+    priority: number;
+    rationale: string;
+    context?: string | null;
+    recommendation?: string | null;
+    recommendationReasoning?: string | null;
+    proposedBy: string;
+  }>;
   peerResponse?: string;
   turnNumber: number;
   totalTurns: number;
 }): string {
   const questionList = input.allQuestions
-    .map((q, i) => `  ${i + 1}. [Priority ${q.priority}] (${q.proposedBy}) ${q.text}\n     Rationale: ${q.rationale}`)
+    .map((q, i) => [
+      `  ${i + 1}. [Priority ${q.priority}] (${q.proposedBy}) ${q.text}`,
+      `     Why it matters: ${q.rationale}`,
+      q.context ? `     Plain-English context: ${q.context}` : null,
+      q.recommendation ? `     Current recommendation: ${q.recommendation}` : null,
+      q.recommendationReasoning ? `     Recommendation reasoning: ${q.recommendationReasoning}` : null
+    ].filter(Boolean).join("\n"))
     .join("\n");
 
   const isFirstTurn = !input.peerResponse;
@@ -89,48 +93,64 @@ export function buildQuestionDebatePrompt(input: {
     ``,
     `GOAL: Reach unanimous consensus on which interview questions to ask the human.`,
     `The questions MUST be agreed upon by both of you before they are presented.`,
+    `This debate stops only on consensus, explicit clarification blocking, or the turn cap.`,
     `There is no fixed cap on the number of questions — include as many as are genuinely necessary, but not more.`,
+    `Every final interview question must help a human who may prefer Crossfire's recommendation over making the decision manually.`,
+    "",
+    `QUESTION-DEBATE CONTRACT:`,
+    `- synthesizedQuestions: your current proposed consensus list for the interview.`,
+    `- disagreements: specific objections to the peer's latest proposed list; leave this empty ONLY when you fully endorse that list as-is.`,
+    `- questionsForHuman: use ONLY when the debate cannot continue without clarification from the human. Do NOT put normal interview questions there.`,
+    `- Each synthesized question must include plain-English context plus Crossfire's current recommendation and why.`,
     "",
     isFirstTurn
       ? [
           `This is the FIRST turn. Both you and your peer independently analyzed the problem and proposed questions.`,
+          `Start from the combined proposed list from both analyses.`,
           `Your job now:`,
           `1. Review ALL proposed questions critically — challenge each one.`,
           `2. Remove questions that are redundant, low-value, or answerable from the problem statement.`,
-          `3. Add questions that are MISSING but critical for design decisions.`,
-          `4. Propose a revised prioritized question list.`,
-          `5. List your disagreements with the current list in the "disagreements" array.`,
+          `3. Merge semantically similar questions into a single, well-phrased question.`,
+          `4. Add a question only if a critical design decision would otherwise remain under-specified.`,
+          `5. Put your best current proposed consensus list in "synthesizedQuestions".`,
+          `6. Translate each final question into plain human language and include a recommendation the human can adopt if they want Crossfire to decide.`,
+          `7. Use "disagreements" for the specific changes you want from the combined starting list.`,
+          `8. Leave "questionsForHuman" empty unless the debate is blocked on missing human clarification.`,
         ].join("\n")
       : [
-          `Your peer has responded with their critique. Address their specific objections:`,
+          `Your peer has responded with their critique and latest proposed list.`,
+          `Stay on unresolved question-selection issues only. Do NOT restart broad problem analysis.`,
+          `Address their specific objections:`,
           `1. If they challenged a question you support — DEFEND it with evidence or CONCEDE and remove it.`,
-          `2. If they proposed a question you think is weak — explain specifically why.`,
-          `3. Produce YOUR current proposed consensus list (may differ from peer's).`,
-          `4. Your "disagreements" should list ONLY remaining objections to the peer's latest list.`,
-          `5. When you have ZERO disagreements, that means you FULLY ENDORSE the current list as-is.`,
+          `2. If they proposed a question you think is weak, redundant, or already answered — explain specifically why.`,
+          `3. Merge semantically similar questions into a single, well-phrased question before finalizing your list.`,
+          `4. Put YOUR current proposed consensus list in "synthesizedQuestions" (it may still differ from your peer's).`,
+          `5. Preserve plain-English context and a concrete recommendation for every final question.`,
+          `6. "disagreements" must list ONLY remaining specific objections to the peer's latest proposed list. Leave it empty ONLY if you fully endorse that list as-is.`,
+          `7. Put items in "questionsForHuman" ONLY when the debate cannot continue without clarification from the human; do not move ordinary interview questions there.`,
         ].join("\n"),
+    "",
+    `Before finalizing your list, merge any questions that ask for the same information in different words into a single, well-phrased question. Do not include multiple questions that differ only in wording or framing.`,
+    `If you request clarification, still provide your best current "synthesizedQuestions" list alongside the blocker in "questionsForHuman".`,
     "",
     `Respond ONLY with a JSON object:`,
     `{`,
-    `  "actor": "${input.role}",`,
     `  "rawText": "your full reasoning about which questions to keep, add, or remove",`,
     `  "summary": "one paragraph summary of your position",`,
     `  "newInsights": [...],`,
     `  "assumptions": [...],`,
-    `  "disagreements": ["specific objections to current question list — EMPTY means you agree"],`,
-    `  "questionsForPeer": [...],`,
-    `  "questionsForHuman": [],`,
-    `  "proposedSpecDelta": "",`,
-    `  "milestoneReached": null,`,
-    `  "implementationPlan": null,`,
-    `  "proposedQuestions": null,`,
-    `  "degraded": false,`,
+    `  "disagreements": ["specific objections to the peer's latest proposed list — EMPTY only on full endorsement"],`,
+    `  "questionsForHuman": ["clarification needed before debate can continue"],`,
     `  "synthesizedQuestions": [`,
-    `    { "text": "question", "priority": 1, "rationale": "why this matters" }`,
-    `  ],`,
-    `  "followUpQuestions": null,`,
-    `  "sufficientContext": null,`,
-    `  "walkthroughGaps": null`,
+    `    {`,
+    `      "text": "question in plain human language",`,
+    `      "priority": 1,`,
+    `      "rationale": "why this decision matters to the design",`,
+    `      "context": "what this means in practice, in plain English",`,
+    `      "recommendation": "Crossfire's best current recommendation",`,
+    `      "recommendationReasoning": "why this is the current best recommendation and when it might change"`,
+    `    }`,
+    `  ]`,
     `}`,
     "",
     `---`,
@@ -165,72 +185,6 @@ export function buildQuestionDebatePrompt(input: {
   }
 
   return sections.join("\n");
-}
-
-export function buildInterviewFollowUpPrompt(input: {
-  role: "gpt" | "claude";
-  originalProblem: string;
-  questionText: string;
-  questionRationale: string;
-  answer: string;
-  previousAnswers: Array<{ question: string; answer: string }>;
-}): string {
-  const previousContext = input.previousAnswers.length > 0
-    ? input.previousAnswers
-        .map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`)
-        .join("\n\n")
-    : "None yet.";
-
-  return [
-    getPersona(input.role),
-    "",
-    ANTI_SYCOPHANCY,
-    "",
-    `PHASE: INTERVIEW EVALUATION`,
-    `The human has answered an interview question. Evaluate the answer critically — do NOT accept vague or incomplete answers as sufficient.`,
-    `If the answer is evasive, incomplete, or raises new concerns, say so directly and propose follow-up questions.`,
-    "",
-    `Respond ONLY with a JSON object:`,
-    `{`,
-    `  "actor": "${input.role}",`,
-    `  "rawText": "your evaluation of the answer",`,
-    `  "summary": "one paragraph summary",`,
-    `  "newInsights": ["insights gained from this answer"],`,
-    `  "assumptions": ["assumptions resolved or new ones identified"],`,
-    `  "disagreements": [],`,
-    `  "questionsForPeer": [],`,
-    `  "questionsForHuman": [],`,
-    `  "proposedSpecDelta": "",`,
-    `  "milestoneReached": null,`,
-    `  "implementationPlan": null,`,
-    `  "proposedQuestions": null,`,
-    `  "synthesizedQuestions": null,`,
-    `  "degraded": false,`,
-    `  "followUpQuestions": [`,
-      `    { "text": "follow-up question", "priority": 1, "rationale": "why needed" }`,
-    `  ],`,
-    `  "sufficientContext": true/false,`,
-    `  "walkthroughGaps": null`,
-    `}`,
-    "",
-    `0-2 follow-up questions. Set sufficientContext to true if no follow-ups are needed for this topic.`,
-    "",
-    `---`,
-    "",
-    `ORIGINAL PROBLEM:`,
-    input.originalProblem,
-    "",
-    `---`,
-    "",
-    `PREVIOUS Q&A:`,
-    previousContext,
-    "",
-    `---`,
-    "",
-    `CURRENT QUESTION: ${input.questionText}`,
-    `RATIONALE: ${input.questionRationale}`,
-    `HUMAN'S ANSWER: ${input.answer}`
-  ].join("\n");
 }
 
 export function buildSpecPrompt(input: {
@@ -272,23 +226,11 @@ export function buildSpecPrompt(input: {
     "",
     `Respond ONLY with a JSON object:`,
     `{`,
-    `  "actor": "${input.role}",`,
     `  "rawText": "brief overview of both documents",`,
     `  "summary": "one paragraph summary",`,
-    `  "newInsights": [],`,
-    `  "assumptions": [],`,
-    `  "disagreements": [],`,
-    `  "questionsForPeer": [],`,
-    `  "questionsForHuman": [],`,
     `  "proposedSpecDelta": "DOCUMENT 1 (the full specification in markdown)",`,
     `  "milestoneReached": "implementation_plan_ready",`,
-    `  "degraded": false,`,
-    `  "implementationPlan": "DOCUMENT 2 (the full implementation plan in markdown)",`,
-    `  "proposedQuestions": null,`,
-    `  "synthesizedQuestions": null,`,
-    `  "followUpQuestions": null,`,
-    `  "sufficientContext": null,`,
-    `  "walkthroughGaps": null`,
+    `  "implementationPlan": "DOCUMENT 2 (the full implementation plan in markdown)"`,
     `}`,
     "",
     `---`,
@@ -352,6 +294,9 @@ export function buildWalkthroughPrompt(input: {
     `- WHAT goes wrong when you try to execute it`,
     `- A CONCRETE FIX (specific text to add or change, not "consider addressing this")`,
     "",
+    `If multiple issues stem from the same root cause, merge them into a single gap entry.`,
+    `Reference all affected sections in the location field, and propose one fix that addresses the root cause rather than listing each symptom separately.`,
+    "",
     `The \`walkthroughGaps\` array is the canonical machine-readable output.`,
     `Every actionable issue mentioned in \`rawText\` MUST also appear in \`walkthroughGaps\`.`,
     `Do NOT leave \`walkthroughGaps\` empty unless you genuinely found zero operational gaps.`,
@@ -360,22 +305,9 @@ export function buildWalkthroughPrompt(input: {
     "",
     `Respond ONLY with a JSON object:`,
     `{`,
-    `  "actor": "${input.role}",`,
     `  "rawText": "your full walkthrough with all gaps found",`,
     `  "summary": "one paragraph summary of findings",`,
     `  "newInsights": ["insight1", ...],`,
-    `  "assumptions": [],`,
-    `  "disagreements": [],`,
-    `  "questionsForPeer": [],`,
-    `  "questionsForHuman": [],`,
-    `  "proposedSpecDelta": "",`,
-    `  "milestoneReached": null,`,
-    `  "implementationPlan": null,`,
-    `  "proposedQuestions": null,`,
-    `  "synthesizedQuestions": null,`,
-    `  "followUpQuestions": null,`,
-    `  "sufficientContext": null,`,
-    `  "degraded": false,`,
     `  "walkthroughGaps": [`,
     `    {`,
     `      "location": "section or quote in the spec",`,

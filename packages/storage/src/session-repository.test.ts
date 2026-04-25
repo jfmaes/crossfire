@@ -56,6 +56,36 @@ describe("SessionRepository", () => {
     expect(repo.findSummaryBySessionId("sess_1")?.artifactPath).toBe("/tmp/session.md");
   });
 
+  it("marks unfinished debating session runs failed during startup recovery", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Interrupted session",
+      status: "debating",
+      phase: "analysis"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "create",
+      status: "running",
+      phase: "analysis",
+      startedAt: "2026-04-25T09:00:00.000Z"
+    });
+
+    expect(repo.recoverStaleDebatingSessions()).toBe(1);
+
+    const recoveredSession = repo.findById("sess_1");
+    const recoveredRun = repo.findRunById("run_1");
+    expect(recoveredSession?.status).toBe("errored");
+    expect(recoveredRun?.status).toBe("failed");
+    expect(recoveredRun?.finishedAt).toBeTruthy();
+    expect(recoveredRun?.errorMessage).toContain("daemon stopped");
+    expect(repo.findActiveRun("sess_1")).toBeUndefined();
+  });
+
   it("persists data across file-backed database reopen", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "council-storage-"));
     const databasePath = path.join(tempDir, "council.sqlite");

@@ -88,7 +88,7 @@ describe("ClaudeAdapter", () => {
       sessionId: "sess_1",
       phase: "interview",
       prompt: "interview prompt 2",
-      resumeSessionId: "interview prompt 1-session"
+      resumeSessionId: undefined
     });
     expect(process.calls[3]).toMatchObject({
       sessionId: "sess_1",
@@ -100,7 +100,7 @@ describe("ClaudeAdapter", () => {
       sessionId: "sess_1",
       phase: "spec_generation",
       prompt: "spec prompt 2",
-      resumeSessionId: "spec prompt 1-session"
+      resumeSessionId: undefined
     });
     expect(process.calls[5].sessionId).toBe("sess_1");
     expect(process.calls[5].resumeSessionId).toBeUndefined();
@@ -108,5 +108,37 @@ describe("ClaudeAdapter", () => {
     expect(process.calls[6].sessionId).toBe("sess_1");
     expect(process.calls[6].resumeSessionId).toContain("debate prompt 1-session");
     expect(process.calls[6].prompt).toContain("conversation context above");
+  });
+
+  it("surfaces provider auth failures as errors instead of degraded turns", async () => {
+    const process = {
+      async *runTurn() {
+        yield {
+          type: "result",
+          text: 'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"},"request_id":"req_123"}'
+        } as const;
+      },
+      async healthCheck() {
+        return { ok: true, detail: "claude ready" };
+      }
+    };
+
+    const adapter = new ClaudeAdapter(process);
+    const eventTypes: string[] = [];
+    let errorMessage = "";
+
+    for await (const event of adapter.sendTurn({
+      sessionId: "sess_1",
+      prompt: "Find hidden risks"
+    })) {
+      eventTypes.push(event.type);
+      if (event.type === "error") {
+        errorMessage = event.message;
+      }
+    }
+
+    expect(eventTypes).toContain("error");
+    expect(eventTypes).not.toContain("structured_turn");
+    expect(errorMessage).toContain("Failed to authenticate.");
   });
 });

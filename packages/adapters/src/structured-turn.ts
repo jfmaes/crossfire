@@ -3,6 +3,20 @@ import { modelTurnSchema, type ModelTurn } from "@council/core";
 const providerTurnSchema = modelTurnSchema.omit({
   actor: true,
   degraded: true
+}).partial({
+  newInsights: true,
+  assumptions: true,
+  disagreements: true,
+  questionsForPeer: true,
+  questionsForHuman: true,
+  proposedSpecDelta: true,
+  milestoneReached: true,
+  implementationPlan: true,
+  proposedQuestions: true,
+  synthesizedQuestions: true,
+  followUpQuestions: true,
+  sufficientContext: true,
+  walkthroughGaps: true
 });
 
 function toRawString(value: unknown) {
@@ -15,6 +29,24 @@ function toRawString(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+export function detectProviderFailureText(rawValue: unknown): string | null {
+  const rawText = toRawString(rawValue).trim();
+  if (!rawText) return null;
+
+  if (/^Failed to authenticate\./i.test(rawText)) {
+    return rawText;
+  }
+
+  if (
+    /^\{"type":"error","error":\{"type":"authentication_error"/i.test(rawText) ||
+    (/Invalid authentication credentials/i.test(rawText) && /request_id/i.test(rawText))
+  ) {
+    return rawText;
+  }
+
+  return null;
 }
 
 export function createDegradedTurn(actor: "gpt" | "claude", rawValue: unknown): ModelTurn {
@@ -64,9 +96,34 @@ export function parseStructuredTurn(actor: "gpt" | "claude", rawValue: unknown):
     return createDegradedTurn(actor, rawValue);
   }
 
-  return {
-    ...validated.data,
+  const turn: Record<string, unknown> = {
+    rawText: validated.data.rawText,
+    summary: validated.data.summary,
+    newInsights: validated.data.newInsights ?? [],
+    assumptions: validated.data.assumptions ?? [],
+    questionsForPeer: validated.data.questionsForPeer ?? [],
     actor,
     degraded: false
   };
+
+  const controlFields = [
+    "disagreements",
+    "questionsForHuman",
+    "proposedSpecDelta",
+    "milestoneReached",
+    "implementationPlan",
+    "proposedQuestions",
+    "synthesizedQuestions",
+    "followUpQuestions",
+    "sufficientContext",
+    "walkthroughGaps"
+  ] as const;
+
+  for (const field of controlFields) {
+    if (Object.prototype.hasOwnProperty.call(validated.data, field)) {
+      turn[field] = validated.data[field];
+    }
+  }
+
+  return turn as ModelTurn;
 }

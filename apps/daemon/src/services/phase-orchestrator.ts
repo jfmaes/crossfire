@@ -3,13 +3,13 @@ import type { ProviderAdapter } from "@council/adapters";
 import {
   buildAnalysisPrompt,
   buildQuestionDebatePrompt,
-  buildInterviewFollowUpPrompt,
   buildSpecPrompt,
   buildWalkthroughPrompt
 } from "@council/adapters";
 import { emitProgress, summarizeProgressText } from "./progress";
 import { createOrchestrator } from "./orchestrator";
 import { debugLogPrompt, debugLogResponse } from "./debug-log";
+import { validatePhaseTurn, type PhaseValidationPhase } from "./phase-validation";
 
 interface PhaseOrchestratorInput {
   gpt: ProviderAdapter;
@@ -20,29 +20,47 @@ interface ProposedQuestion {
   text: string;
   priority: number;
   rationale: string;
+  context?: string | null;
+  recommendation?: string | null;
+  recommendationReasoning?: string | null;
 }
 
 interface AnalysisResult {
   gptAnalysis: string;
   claudeAnalysis: string;
   proposedQuestions: Array<ProposedQuestion & { proposedBy: "gpt" | "claude" }>;
+  trace: {
+    gpt: TurnTrace;
+    claude: TurnTrace;
+  };
 }
 
 interface QuestionDebateResult {
-  synthesizedQuestions: Array<ProposedQuestion & { id: string; proposedBy: "synthesized" }>;
+  synthesizedQuestions: Array<ProposedQuestion & {
+    id: string;
+    proposedBy: "synthesized";
+  }>;
   debateSummary: string;
-}
-
-interface InterviewStepResult {
-  evaluation: string;
-  followUpQuestions: Array<ProposedQuestion & { id: string; proposedBy: "gpt" | "claude" }>;
-  sufficientContext: boolean;
+  turns: QuestionDebateTurn[];
+  trace: DebateTrace & {
+    clarificationRequested: boolean;
+    finalQuestionCount: number;
+    turnTraces: TurnTrace[];
+  };
 }
 
 interface ApproachDebateResult {
   convergedApproach: string;
-  turns: Array<{ actor: string; summary: string }>;
+  finalApproachHandoff: string;
+  turns: Array<{
+    actor: "gpt" | "claude";
+    summary: string;
+    disagreements: string[];
+    rawText: string;
+    proposedSpecDelta: string;
+  }>;
   questionsForHuman: string[];
+  trace: DebateTrace;
 }
 
 interface WalkthroughGap {
@@ -56,6 +74,84 @@ interface SpecGenerationResult {
   implementationPlan: string;
   summary: string;
   walkthroughGaps?: WalkthroughGap[];
+  trace: {
+    draft: TurnTrace;
+    review: TurnTrace;
+    gptWalkthrough: TurnTrace;
+    claudeWalkthrough: TurnTrace;
+    revision?: TurnTrace;
+    revisedAfterWalkthrough: boolean;
+    gapCount: number;
+    freshContext: {
+      draft: boolean;
+      review: boolean;
+      walkthrough: boolean;
+      revision: boolean;
+    };
+    canonicalHandoffUsed: boolean;
+    canonicalApproachHandoff: boolean;
+    usedCanonicalApproachHandoff: boolean;
+    authorityPathUncompressed: boolean;
+    authorityPathUncompacted: boolean;
+    compaction: {
+      approachResult: boolean;
+      peerDraft: boolean;
+      revisionPeerDraft: boolean;
+    };
+  };
+}
+
+interface DebateTrace {
+  stopReason: "consensus" | "questions_for_human" | "max_turns";
+  totalTurns: number;
+  turnsUsed: number;
+  maxTurns: number;
+  finalDisagreementCount: number;
+  finalDisagreements: string[];
+}
+
+interface QuestionDebateTurn {
+  actor: "gpt" | "claude";
+  summary: string;
+  disagreements: string[];
+  questionsForHuman: string[];
+  rawText: string;
+  synthesizedQuestions: ProposedQuestion[];
+}
+
+interface PromptLedgerEntry {
+  name: string;
+  originalChars: number;
+  finalChars: number;
+  compacted: boolean;
+  omitted: boolean;
+  viaConversationReuse: boolean;
+}
+
+interface CompactionMetadata {
+  component: string;
+  originalChars: number;
+  finalChars: number;
+  sectionsCompacted: string[];
+}
+
+interface TurnTrace {
+  outputStatus: "ok" | "degraded" | "phase_invalid";
+  missingFields: string[];
+  conversationReused: boolean;
+  promptLedger: PromptLedgerEntry[];
+}
+
+class AuthorityInputTooLargeError extends Error {
+  constructor(
+    public readonly code: "spec_generation_input_too_large" | "revision_input_too_large",
+    public readonly component: string,
+    public readonly actualChars: number,
+    public readonly budgetChars: number
+  ) {
+    super(`${code}: ${component} is ${actualChars} chars (budget ${budgetChars})`);
+    this.name = "AuthorityInputTooLargeError";
+  }
 }
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
@@ -76,10 +172,20 @@ function extractJsonFromText(text: string): Record<string, unknown> | null {
   }
 }
 
+function toStructuredRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
 async function collectTurnOutput(
   provider: ProviderAdapter,
-  input: { sessionId: string; runId?: string; prompt: string; phase: string }
-): Promise<{ rawText: string; parsed: Record<string, unknown> | null }> {
+  input: {
+    sessionId: string;
+    runId?: string;
+    prompt: string;
+    phase: PhaseValidationPhase;
+    promptLedger?: PromptLedgerEntry[];
+  }
+): Promise<{ rawText: string; parsed: Record<string, unknown> | null; trace: TurnTrace }> {
   const model = provider.name as "gpt" | "claude";
   const startTime = Date.now();
   emitProgress({
@@ -97,6 +203,8 @@ async function collectTurnOutput(
   let rawText = "";
   let parsed: Record<string, unknown> | null = null;
   let providerError: string | null = null;
+  let conversationReused = false;
+  let rawResponse = "";
 
   for await (const event of provider.sendTurn({
     sessionId: input.sessionId,
@@ -115,12 +223,26 @@ async function collectTurnOutput(
       continue;
     }
 
+    if (event.type === "progress") {
+      emitProgress({
+        sessionId: input.sessionId,
+        runId: input.runId,
+        type: "model_progress",
+        model,
+        phase: input.phase,
+        message: summarizeProgressText(event.text)
+      });
+      continue;
+    }
+
     if (event.type === "error") {
       providerError = event.message;
       continue;
     }
 
     if (event.type === "structured_turn") {
+      rawResponse = event.rawResponse;
+      conversationReused = event.conversationReused ?? false;
       rawText = event.turn.rawText || event.turn.summary;
       parsed = { ...event.turn };
 
@@ -159,6 +281,11 @@ async function collectTurnOutput(
       model,
       phase: input.phase,
       elapsedMs,
+      metadata: {
+        outputStatus: "provider_error",
+        conversationReused,
+        promptLedger: input.promptLedger ?? []
+      },
       message: `Failed in ${elapsed}s — ${errorMessage}`
     });
 
@@ -174,10 +301,26 @@ async function collectTurnOutput(
     throw new Error(`${model.toUpperCase()} ${input.phase} failed: ${errorMessage}`);
   }
 
-  const degraded = parsed?.degraded ? " (degraded)" : "";
+  const validation = validatePhaseTurn(
+    input.phase,
+    rawResponse ? extractJsonFromText(rawResponse) : toStructuredRecord(parsed)
+  );
+  const missingFields = validation.missingFields;
+  const outputStatus: TurnTrace["outputStatus"] =
+    parsed?.degraded ? "degraded"
+    : missingFields.length > 0 ? "phase_invalid"
+    : "ok";
+
+  const degraded = outputStatus === "degraded" ? " (degraded)" : outputStatus === "phase_invalid" ? " (phase-invalid)" : "";
   emitProgress({
     sessionId: input.sessionId, runId: input.runId, type: "model_done", model,
     phase: input.phase, elapsedMs,
+    metadata: {
+      outputStatus,
+      missingFields,
+      conversationReused,
+      promptLedger: input.promptLedger ?? []
+    },
     message: `Done in ${elapsed}s — ${chars} chars${degraded}`
   });
 
@@ -190,7 +333,20 @@ async function collectTurnOutput(
     elapsedMs
   });
 
-  return { rawText, parsed };
+  if (outputStatus !== "ok") {
+    throw new Error(`${model.toUpperCase()} ${input.phase} failed: ${outputStatus === "degraded" ? "degraded structured output" : `missing required fields: ${missingFields.join(", ")}`}`);
+  }
+
+  return {
+    rawText,
+    parsed,
+    trace: {
+      outputStatus,
+      missingFields,
+      conversationReused,
+      promptLedger: input.promptLedger ?? []
+    }
+  };
 }
 
 export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
@@ -204,10 +360,19 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis", message: "Phase 1: Dual Analysis (GPT + Claude in parallel)" });
       const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt });
       const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt });
+      const analysisLedger = [
+        makePromptLedgerEntry("originalProblem", prompt)
+      ];
 
       const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, runId, prompt: gptPrompt, phase: "analysis" }),
-        collectTurnOutput(input.claude, { sessionId, runId, prompt: claudePrompt, phase: "analysis" })
+        collectTurnOutput(input.gpt, {
+          sessionId, runId, prompt: gptPrompt, phase: "analysis",
+          promptLedger: analysisLedger
+        }),
+        collectTurnOutput(input.claude, {
+          sessionId, runId, prompt: claudePrompt, phase: "analysis",
+          promptLedger: analysisLedger
+        })
       ]);
 
       const gptQuestions: Array<ProposedQuestion & { proposedBy: "gpt" }> =
@@ -222,7 +387,11 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       return {
         gptAnalysis: gptResult.rawText || (gptResult.parsed?.rawText as string) || "Analysis unavailable",
         claudeAnalysis: claudeResult.rawText || (claudeResult.parsed?.rawText as string) || "Analysis unavailable",
-        proposedQuestions: deduplicated
+        proposedQuestions: deduplicated,
+        trace: {
+          gpt: gptResult.trace,
+          claude: claudeResult.trace
+        }
       };
     },
 
@@ -234,116 +403,164 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       questions: Array<ProposedQuestion & { proposedBy: string }>,
       runId?: string
     ): Promise<QuestionDebateResult> {
-      // Single parallel synthesis instead of multi-turn debate.
-      // Both models independently review the proposed questions and produce
-      // their preferred list. We merge the results. This replaces the old
-      // 4-6 turn sequential debate (~350s) with a single parallel call (~60-170s).
-      emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis_debate", message: `Question Synthesis (${questions.length} proposed — both models filter in parallel)` });
-
-      const synthesisPrompt = (role: "gpt" | "claude") => buildQuestionDebatePrompt({
-        role,
-        originalProblem: prompt,
-        gptAnalysis,
-        claudeAnalysis,
-        allQuestions: questions,
-        turnNumber: 1,
-        totalTurns: 1
+      const maxTurns = 4;
+      emitProgress({
+        sessionId,
+        runId,
+        type: "phase_start",
+        phase: "analysis_debate",
+        message: `Question Debate (${questions.length} proposed — up to ${maxTurns} turns)`
       });
 
-      const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, runId, prompt: synthesisPrompt("gpt"), phase: "analysis_debate" }),
-        collectTurnOutput(input.claude, { sessionId, runId, prompt: synthesisPrompt("claude"), phase: "analysis_debate" })
-      ]);
+      const providers: Array<{ role: "gpt" | "claude"; provider: ProviderAdapter }> = [
+        { role: "gpt", provider: input.gpt },
+        { role: "claude", provider: input.claude }
+      ];
 
-      // Extract synthesized questions from both, prefer Claude's if both produced them
-      let synthesized: Array<ProposedQuestion & { id: string; proposedBy: "synthesized" }> = [];
+      const turns: QuestionDebateTurn[] = [];
+      const turnTraces: TurnTrace[] = [];
+      let peerResponse: string | undefined;
+      let currentQuestions = deduplicateQuestions(questions.map((question) => ({
+        text: question.text,
+        priority: question.priority,
+        rationale: question.rationale,
+        context: question.context ?? null,
+        recommendation: question.recommendation ?? null,
+        recommendationReasoning: question.recommendationReasoning ?? null
+      })));
+      let stopReason: DebateTrace["stopReason"] = "max_turns";
 
-      for (const result of [claudeResult, gptResult]) {
-        if (synthesized.length > 0) break;
-        const qs = extractSynthesizedQuestions(result.parsed);
-        if (qs.length > 0) {
-          synthesized = qs
-            .sort((a, b) => a.priority - b.priority)
-            .map((q) => ({ ...q, id: randomUUID(), proposedBy: "synthesized" as const }));
+      for (let i = 0; i < maxTurns; i++) {
+        const { role, provider } = providers[i % 2];
+        const debatePrompt = buildQuestionDebatePrompt({
+          role,
+          originalProblem: prompt,
+          gptAnalysis,
+          claudeAnalysis,
+          allQuestions: currentQuestions.map((question) => ({
+            ...question,
+            proposedBy: "current_list"
+          })),
+          peerResponse,
+          turnNumber: i + 1,
+          totalTurns: maxTurns
+        });
+
+        const promptLedger = [
+          makePromptLedgerEntry("originalProblem", prompt),
+          makePromptLedgerEntry("gptAnalysis", gptAnalysis),
+          makePromptLedgerEntry("claudeAnalysis", claudeAnalysis),
+          makePromptLedgerEntry(
+            "currentQuestions",
+            currentQuestions.map((question) => [
+              `${question.priority}. ${question.text}`,
+              question.rationale,
+              question.context ?? "",
+              question.recommendation ?? "",
+              question.recommendationReasoning ?? ""
+            ].filter(Boolean).join("\n")).join("\n\n")
+          ),
+          ...(peerResponse ? [makePromptLedgerEntry("peerResponse", peerResponse)] : [])
+        ];
+
+        const result = await collectTurnOutput(provider, {
+          sessionId,
+          runId,
+          prompt: debatePrompt,
+          phase: "analysis_debate",
+          promptLedger
+        });
+
+        const synthesizedQuestions = deduplicateQuestions(
+          extractSynthesizedQuestions(result.parsed).map((question) => ({
+            text: question.text,
+            priority: question.priority,
+            rationale: question.rationale,
+            context: question.context ?? null,
+            recommendation: question.recommendation ?? null,
+            recommendationReasoning: question.recommendationReasoning ?? null
+          }))
+        );
+        const questionsForHuman = extractStringList(result.parsed, "questionsForHuman");
+        const disagreements = extractStringList(result.parsed, "disagreements");
+        const turn: QuestionDebateTurn = {
+          actor: role,
+          summary: (result.parsed?.summary as string) || result.rawText,
+          disagreements,
+          questionsForHuman,
+          rawText: result.rawText,
+          synthesizedQuestions
+        };
+
+        turns.push(turn);
+        turnTraces.push(result.trace);
+
+        if (synthesizedQuestions.length > 0) {
+          currentQuestions = synthesizedQuestions;
+        }
+
+        peerResponse = buildQuestionDebatePeerResponse(turn);
+
+        if (questionsForHuman.length > 0) {
+          stopReason = "questions_for_human";
+          break;
+        }
+
+        if (hasReachedQuestionConsensus(turns)) {
+          stopReason = "consensus";
+          break;
         }
       }
 
-      // Fall back to original proposed questions (deduplicated)
-      if (synthesized.length === 0) {
-        synthesized = questions.map((q) => ({
-          ...q,
-          id: randomUUID(),
-          proposedBy: "synthesized" as const
-        }));
-      }
+      const finalTurns = turns.slice(-2);
+      const finalDisagreements = collectFinalDisagreements(finalTurns);
+      const synthesizedQuestions = currentQuestions.map((question) => ({
+        ...question,
+        id: randomUUID(),
+        proposedBy: "synthesized" as const
+      }));
+      const debateSummary = buildQuestionDebateNarrative(
+        turns,
+        stopReason,
+        finalDisagreements,
+        synthesizedQuestions
+      );
+      const trace = {
+        stopReason,
+        totalTurns: turns.length,
+        turnsUsed: turns.length,
+        maxTurns,
+        finalDisagreementCount: finalDisagreements.length,
+        finalDisagreements,
+        clarificationRequested: stopReason === "questions_for_human",
+        finalQuestionCount: synthesizedQuestions.length,
+        turnTraces
+      } satisfies QuestionDebateResult["trace"];
 
-      const gptSummary = (gptResult.parsed?.summary as string) || gptResult.rawText.slice(0, 200);
-      const claudeSummary = (claudeResult.parsed?.summary as string) || claudeResult.rawText.slice(0, 200);
-      const debateSummary = [
-        "Question synthesis (parallel):",
-        "",
-        `GPT: ${gptSummary}`,
-        `Claude: ${claudeSummary}`
-      ].join("\n");
-
-      emitProgress({ sessionId, runId, type: "consensus", message: `Question synthesis complete — ${synthesized.length} questions selected` });
-
-      return { synthesizedQuestions: synthesized, debateSummary };
-    },
-
-    async runInterviewStep(
-      sessionId: string,
-      prompt: string,
-      question: { text: string; rationale: string },
-      answer: string,
-      previousAnswers: Array<{ question: string; answer: string }>,
-      runId?: string
-    ): Promise<InterviewStepResult> {
-      emitProgress({ sessionId, runId, type: "phase_start", phase: "interview", message: "Evaluating answer (GPT + Claude in parallel)" });
-      const gptPromptText = buildInterviewFollowUpPrompt({
-        role: "gpt",
-        originalProblem: prompt,
-        questionText: question.text,
-        questionRationale: question.rationale,
-        answer,
-        previousAnswers
+      emitProgress({
+        sessionId,
+        runId,
+        type: stopReason === "consensus" ? "consensus" : "info",
+        phase: "analysis_debate",
+        metadata: {
+          stopReason,
+          totalTurns: turns.length,
+          finalDisagreementCount: finalDisagreements.length,
+          finalDisagreements
+        },
+        message:
+          stopReason === "consensus"
+            ? `Question debate reached consensus after ${turns.length} turn(s)`
+            : stopReason === "questions_for_human"
+              ? `Question debate paused for clarification after ${turns.length} turn(s)`
+              : `Question debate stopped at the ${maxTurns}-turn cap`
       });
-
-      const claudePromptText = buildInterviewFollowUpPrompt({
-        role: "claude",
-        originalProblem: prompt,
-        questionText: question.text,
-        questionRationale: question.rationale,
-        answer,
-        previousAnswers
-      });
-
-      const [gptResult, claudeResult] = await Promise.all([
-        collectTurnOutput(input.gpt, { sessionId, runId, prompt: gptPromptText, phase: "interview" }),
-        collectTurnOutput(input.claude, { sessionId, runId, prompt: claudePromptText, phase: "interview" })
-      ]);
-
-      const gptFollowUps = extractFollowUpQuestions(gptResult.parsed, "gpt");
-      const claudeFollowUps = extractFollowUpQuestions(claudeResult.parsed, "claude");
-
-      const allFollowUps = deduplicateQuestions([...gptFollowUps, ...claudeFollowUps])
-        .map((q) => ({ ...q, id: randomUUID() }));
-
-      const gptSufficient = (gptResult.parsed?.sufficientContext as boolean) ?? true;
-      const claudeSufficient = (claudeResult.parsed?.sufficientContext as boolean) ?? true;
-
-      const evaluation = [
-        "GPT evaluation:",
-        (gptResult.parsed?.summary as string) || gptResult.rawText,
-        "",
-        "Claude evaluation:",
-        (claudeResult.parsed?.summary as string) || claudeResult.rawText
-      ].join("\n");
 
       return {
-        evaluation,
-        followUpQuestions: allFollowUps,
-        sufficientContext: gptSufficient && claudeSufficient && allFollowUps.length === 0
+        synthesizedQuestions,
+        debateSummary,
+        turns,
+        trace
       };
     },
 
@@ -351,8 +568,11 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       sessionId: string,
       prompt: string,
       interviewResults: Array<{ question: string; answer: string }>,
-      runId?: string
+      runIdOrMaxTurns?: string | number,
+      maybeRunId?: string
     ): Promise<ApproachDebateResult> {
+      const maxTurns = typeof runIdOrMaxTurns === "number" ? runIdOrMaxTurns : 14;
+      const runId = typeof runIdOrMaxTurns === "string" ? runIdOrMaxTurns : maybeRunId;
       emitProgress({ sessionId, runId, type: "phase_start", phase: "approach_debate", message: `Approach Debate (consensus-driven, ${interviewResults.length} interview answers as context)` });
       const enrichedPrompt = [
         prompt,
@@ -366,49 +586,86 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       const round = await classicOrchestrator.runRound({
         sessionId,
         prompt: enrichedPrompt,
+        maxTurns,
         runId
       });
 
       const turns = round.state.turns.map((t) => ({
-        actor: t.actor,
+        actor: t.actor as "gpt" | "claude",
         summary: t.summary,
         disagreements: t.disagreements,
-        rawText: t.rawText
+        rawText: t.rawText,
+        proposedSpecDelta: t.proposedSpecDelta
       }));
 
-      const lastTurn = round.state.turns.at(-1);
-      const convergedApproach = lastTurn
-        ? `${lastTurn.rawText}\n\nProposed spec delta:\n${lastTurn.proposedSpecDelta}`
-        : "No converged approach";
+      const finalTurns = round.state.turns.slice(-2);
+      const finalDisagreements = collectFinalDisagreements(finalTurns);
+      const convergedApproach = buildBalancedApproachNarrative(finalTurns, round.stopReason, finalDisagreements);
+      const finalApproachHandoff = buildCanonicalApproachHandoff(
+        turns.slice(-2),
+        round.stopReason,
+        finalDisagreements
+      );
 
       // Surface any questions the models have for the human (debate paused for clarification)
-      const questionsForHuman = lastTurn?.questionsForHuman ?? [];
+      const latestTurn = round.state.turns.at(-1);
+      const questionsForHuman = latestTurn?.questionsForHuman ?? [];
+      const finalDisagreementCount = finalDisagreements.length;
 
-      return { convergedApproach, turns, questionsForHuman };
+      return {
+        convergedApproach,
+        finalApproachHandoff,
+        turns,
+        questionsForHuman,
+        trace: {
+          stopReason: round.stopReason,
+          totalTurns: round.state.turns.length,
+          turnsUsed: round.state.turns.length,
+          maxTurns,
+          finalDisagreementCount,
+          finalDisagreements
+        }
+      };
     },
 
     async runSpecGeneration(
       sessionId: string,
       prompt: string,
       interviewResults: Array<{ question: string; answer: string }>,
-      approachResult: string,
+      finalApproachHandoff: string,
       runId?: string
     ): Promise<SpecGenerationResult> {
       // Step 1: GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
       emitProgress({ sessionId, runId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews → both walkthrough → Claude revises)" });
+      ensureAuthorityInputFits({
+        sessionId,
+        runId,
+        phase: "spec_generation",
+        component: "finalApproachHandoff",
+        text: finalApproachHandoff,
+        budgetChars: 20_000,
+        errorCode: "spec_generation_input_too_large"
+      });
+      const approachLedgerEntry = makePromptLedgerEntry("finalApproachHandoff", finalApproachHandoff);
 
       const draftPrompt = buildSpecPrompt({
         role: "gpt",
         originalProblem: prompt,
         interviewResults,
-        approachResult
+        approachResult: finalApproachHandoff
       });
+      const draftLedger = [
+        makePromptLedgerEntry("originalProblem", prompt),
+        makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+        approachLedgerEntry
+      ];
 
       const draftResult = await collectTurnOutput(input.gpt, {
         sessionId,
         runId,
         prompt: draftPrompt,
-        phase: "spec_generation"
+        phase: "spec_generation",
+        promptLedger: draftLedger
       });
 
       const draftSpec =
@@ -423,20 +680,37 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       const peerDraft = draftPlan
         ? `${draftSpec}\n\n---\n\nIMPLEMENTATION PLAN:\n${draftPlan}`
         : draftSpec;
+      ensureAuthorityInputFits({
+        sessionId,
+        runId,
+        phase: "spec_generation",
+        component: "peerDraft",
+        text: peerDraft,
+        budgetChars: 30_000,
+        errorCode: "spec_generation_input_too_large"
+      });
+      const peerDraftLedgerEntry = makePromptLedgerEntry("peerDraft", peerDraft);
 
       const reviewPrompt = buildSpecPrompt({
         role: "claude",
         originalProblem: prompt,
         interviewResults,
-        approachResult,
+        approachResult: finalApproachHandoff,
         peerDraft
       });
+      const reviewLedger = [
+        makePromptLedgerEntry("originalProblem", prompt),
+        makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+        approachLedgerEntry,
+        peerDraftLedgerEntry
+      ];
 
       const reviewResult = await collectTurnOutput(input.claude, {
         sessionId,
         runId,
         prompt: reviewPrompt,
-        phase: "spec_generation"
+        phase: "spec_generation",
+        promptLedger: reviewLedger
       });
 
       const reviewedSpec =
@@ -464,7 +738,12 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             spec: reviewedSpec,
             implementationPlan: reviewedPlan
           }),
-          phase: "walkthrough"
+          phase: "walkthrough",
+          promptLedger: [
+            makePromptLedgerEntry("originalProblem", prompt),
+            makePromptLedgerEntry("spec", reviewedSpec),
+            makePromptLedgerEntry("implementationPlan", reviewedPlan)
+          ]
         }),
         collectTurnOutput(input.claude, {
           sessionId,
@@ -475,7 +754,12 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             spec: reviewedSpec,
             implementationPlan: reviewedPlan
           }),
-          phase: "walkthrough"
+          phase: "walkthrough",
+          promptLedger: [
+            makePromptLedgerEntry("originalProblem", prompt),
+            makePromptLedgerEntry("spec", reviewedSpec),
+            makePromptLedgerEntry("implementationPlan", reviewedPlan)
+          ]
         })
       ]);
 
@@ -488,6 +772,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       let finalSpec = reviewedSpec;
       let implementationPlan = reviewedPlan;
       let summary = (reviewResult.parsed?.summary as string) || "Spec and implementation plan generated";
+      let revisionTrace: TurnTrace | undefined;
 
       if (allGaps.length > 0) {
         emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
@@ -496,35 +781,54 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           .map((g, i) => `${i + 1}. **${g.location}**: ${g.issue}\n   Fix: ${g.fix}`)
           .join("\n\n");
 
+        const revisionPeerDraft = [
+          reviewedSpec,
+          "",
+          "---",
+          "",
+          `IMPLEMENTATION PLAN:`,
+          reviewedPlan,
+          "",
+          "---",
+          "",
+          `ADVERSARIAL WALKTHROUGH FINDINGS:`,
+          `Both models independently simulated executing this spec and found the following operational gaps.`,
+          `Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.`,
+          "",
+          gapReport
+        ].join("\n");
+        ensureAuthorityInputFits({
+          sessionId,
+          runId,
+          phase: "spec_generation",
+          component: "revisionPeerDraft",
+          text: revisionPeerDraft,
+          budgetChars: 30_000,
+          errorCode: "revision_input_too_large"
+        });
+        const revisionPeerDraftLedgerEntry = makePromptLedgerEntry("revisionPeerDraft", revisionPeerDraft);
+
         const revisionPrompt = buildSpecPrompt({
           role: "claude",
           originalProblem: prompt,
           interviewResults,
-          approachResult,
-          peerDraft: [
-            reviewedSpec,
-            "",
-            "---",
-            "",
-            `IMPLEMENTATION PLAN:`,
-            reviewedPlan,
-            "",
-            "---",
-            "",
-            `ADVERSARIAL WALKTHROUGH FINDINGS:`,
-            `Both models independently simulated executing this spec and found the following operational gaps.`,
-            `Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.`,
-            "",
-            gapReport
-          ].join("\n")
+          approachResult: finalApproachHandoff,
+          peerDraft: revisionPeerDraft
         });
 
         const revisionResult = await collectTurnOutput(input.claude, {
           sessionId,
           runId,
           prompt: revisionPrompt,
-          phase: "spec_generation"
+          phase: "spec_generation",
+          promptLedger: [
+            makePromptLedgerEntry("originalProblem", prompt),
+            makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+            approachLedgerEntry,
+            revisionPeerDraftLedgerEntry
+          ]
         });
+        revisionTrace = revisionResult.trace;
 
         finalSpec =
           (revisionResult.parsed?.proposedSpecDelta as string) ||
@@ -541,8 +845,155 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           `Spec revised after adversarial walkthrough found ${allGaps.length} operational gap(s)`;
       }
 
-      return { spec: finalSpec, implementationPlan, summary, walkthroughGaps: allGaps };
+      return {
+        spec: finalSpec,
+        implementationPlan,
+        summary,
+        walkthroughGaps: allGaps,
+        trace: {
+          draft: draftResult.trace,
+          review: reviewResult.trace,
+          gptWalkthrough: gptWalkthrough.trace,
+          claudeWalkthrough: claudeWalkthrough.trace,
+          revision: revisionTrace,
+          revisedAfterWalkthrough: allGaps.length > 0,
+          gapCount: allGaps.length,
+          freshContext: {
+            draft: true,
+            review: true,
+            walkthrough: true,
+            revision: allGaps.length > 0
+          },
+          canonicalHandoffUsed: true,
+          canonicalApproachHandoff: true,
+          usedCanonicalApproachHandoff: true,
+          authorityPathUncompressed: true,
+          authorityPathUncompacted: true,
+          compaction: {
+            approachResult: false,
+            peerDraft: false,
+            revisionPeerDraft: false
+          }
+        }
+      };
     }
+  };
+}
+
+function makePromptLedgerEntry(
+  name: string,
+  originalText: string,
+  options: { finalText?: string; compacted?: boolean; omitted?: boolean; viaConversationReuse?: boolean } = {}
+): PromptLedgerEntry {
+  const finalText = options.finalText ?? originalText;
+  return {
+    name,
+    originalChars: originalText.length,
+    finalChars: finalText.length,
+    compacted: options.compacted ?? false,
+    omitted: options.omitted ?? false,
+    viaConversationReuse: options.viaConversationReuse ?? false
+  };
+}
+
+function emitCompactionProgress(input: {
+  sessionId: string;
+  runId?: string;
+  phase: PhaseValidationPhase;
+  component: string;
+  promptLedgerEntry: PromptLedgerEntry;
+  compaction: CompactionMetadata;
+  message: string;
+}) {
+  emitProgress({
+    sessionId: input.sessionId,
+    runId: input.runId,
+    type: "info",
+    phase: input.phase,
+    metadata: {
+      compacted: true,
+      component: input.component,
+      promptLedger: [input.promptLedgerEntry],
+      compaction: input.compaction
+    },
+    message: input.message
+  });
+}
+
+function compactMarkdown(text: string, budgetChars: number): {
+  text: string;
+  compacted: boolean;
+  sectionsCompacted: string[];
+} {
+  if (text.length <= budgetChars) {
+    return { text, compacted: false, sectionsCompacted: [] };
+  }
+
+  const keySectionPattern = /\b(tasks?|acceptance criteria|risks?|open questions?|dependencies)\b/i;
+  const sections = text.split(/(?=^#{1,2}\s)/m);
+  const sectionsCompacted: string[] = [];
+  const compactedSections = sections.map((section) => {
+    const lines = section.split("\n");
+    const header = lines[0] ?? "";
+    const bodyLines = lines.slice(1);
+    const isKeySection = keySectionPattern.test(header);
+
+    if (isKeySection) {
+      sectionsCompacted.push(header || "unlabeled section");
+      const kept = bodyLines
+        .filter((line) => /^(\s*[-*]|\s*\d+\.)/.test(line) || line.trim() === "")
+        .map((line) => line.length > 160 ? `${line.slice(0, 157)}...` : line);
+      return [header, ...kept].join("\n").trim();
+    }
+
+    const paragraphLines: string[] = [];
+    let inCodeBlock = false;
+    let codeBlock: string[] = [];
+
+    for (const line of bodyLines) {
+      if (line.trim().startsWith("```")) {
+        if (!inCodeBlock) {
+          inCodeBlock = true;
+          codeBlock = [line];
+          continue;
+        }
+        codeBlock.push(line);
+        if (codeBlock.length <= 22) {
+          paragraphLines.push(...codeBlock);
+        } else {
+          paragraphLines.push("[long code block omitted during compaction]");
+        }
+        break;
+      }
+
+      if (inCodeBlock) {
+        codeBlock.push(line);
+        continue;
+      }
+
+      if (paragraphLines.length > 0 && line.trim() === "") {
+        break;
+      }
+
+      if (paragraphLines.length > 0 || line.trim() !== "") {
+        paragraphLines.push(line);
+      }
+    }
+
+    return [header, ...paragraphLines].join("\n").trim();
+  });
+
+  let compactedText = compactedSections.filter(Boolean).join("\n\n");
+  const footer = `\n\n[Compacted from ${text.length} chars to ${Math.min(compactedText.length, budgetChars)} chars. Lower-priority details omitted.]`;
+
+  if (compactedText.length + footer.length > budgetChars) {
+    compactedText = compactedText.slice(0, Math.max(0, budgetChars - footer.length - 3)).trimEnd() + "...";
+  }
+
+  return {
+    text: `${compactedText}${footer}`,
+    compacted: true,
+    sectionsCompacted
   };
 }
 
@@ -554,7 +1005,14 @@ function extractProposedQuestions<T extends "gpt" | "claude">(
 
   // Check questionsForHuman as fallback
   const proposedQuestions = parsed.proposedQuestions as
-    | Array<{ text: string; priority: number; rationale: string }>
+    | Array<{
+        text: string;
+        priority: number;
+        rationale: string;
+        context?: string | null;
+        recommendation?: string | null;
+        recommendationReasoning?: string | null;
+      }>
     | undefined;
 
   if (Array.isArray(proposedQuestions)) {
@@ -562,6 +1020,9 @@ function extractProposedQuestions<T extends "gpt" | "claude">(
       text: q.text || `Question ${i + 1}`,
       priority: q.priority ?? i + 1,
       rationale: q.rationale || "No rationale provided",
+      context: typeof q.context === "string" ? q.context : null,
+      recommendation: typeof q.recommendation === "string" ? q.recommendation : null,
+      recommendationReasoning: typeof q.recommendationReasoning === "string" ? q.recommendationReasoning : null,
       proposedBy
     }));
   }
@@ -573,6 +1034,9 @@ function extractProposedQuestions<T extends "gpt" | "claude">(
       text: q,
       priority: i + 1,
       rationale: "Extracted from questionsForHuman",
+      context: null,
+      recommendation: null,
+      recommendationReasoning: null,
       proposedBy
     }));
   }
@@ -586,7 +1050,14 @@ function extractSynthesizedQuestions(
   if (!parsed) return [];
 
   const synthesized = parsed.synthesizedQuestions as
-    | Array<{ text: string; priority: number; rationale: string }>
+    | Array<{
+        text: string;
+        priority: number;
+        rationale: string;
+        context?: string | null;
+        recommendation?: string | null;
+        recommendationReasoning?: string | null;
+      }>
     | undefined;
 
   if (Array.isArray(synthesized)) {
@@ -594,33 +1065,14 @@ function extractSynthesizedQuestions(
       text: q.text || `Question ${i + 1}`,
       priority: q.priority ?? i + 1,
       rationale: q.rationale || "No rationale provided",
+      context: typeof q.context === "string" ? q.context : null,
+      recommendation: typeof q.recommendation === "string" ? q.recommendation : null,
+      recommendationReasoning: typeof q.recommendationReasoning === "string" ? q.recommendationReasoning : null,
       proposedBy: (parsed.actor as "gpt" | "claude") || "gpt"
     }));
   }
 
   return extractProposedQuestions(parsed, (parsed.actor as "gpt" | "claude") || "gpt");
-}
-
-function extractFollowUpQuestions<T extends "gpt" | "claude">(
-  parsed: Record<string, unknown> | null,
-  proposedBy: T
-): Array<ProposedQuestion & { proposedBy: T }> {
-  if (!parsed) return [];
-
-  const followUps = parsed.followUpQuestions as
-    | Array<{ text: string; priority: number; rationale: string }>
-    | undefined;
-
-  if (Array.isArray(followUps)) {
-    return followUps.map((q, i) => ({
-      text: q.text || `Follow-up ${i + 1}`,
-      priority: q.priority ?? i + 1,
-      rationale: q.rationale || "No rationale provided",
-      proposedBy
-    }));
-  }
-
-  return [];
 }
 
 function extractWalkthroughGaps(
@@ -661,7 +1113,7 @@ function deduplicateGaps(gaps: WalkthroughGap[]): WalkthroughGap[] {
   return result;
 }
 
-function deduplicateQuestions<T extends ProposedQuestion & { proposedBy: string }>(
+function deduplicateQuestions<T extends ProposedQuestion>(
   questions: T[]
 ): T[] {
   const seen = new Set<string>();
@@ -676,4 +1128,233 @@ function deduplicateQuestions<T extends ProposedQuestion & { proposedBy: string 
   }
 
   return result.sort((a, b) => a.priority - b.priority);
+}
+
+const QUESTION_STOPWORDS = new Set([
+  "a", "an", "and", "are", "be", "for", "from", "how", "if", "in", "is", "it", "of", "on",
+  "or", "the", "to", "what", "when", "which", "who", "why", "will", "with", "would", "should"
+]);
+
+function normalizeQuestionToken(token: string): string {
+  const stripped = token.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+  if (!stripped) return "";
+
+  return stripped.endsWith("ies") && stripped.length > 3 ? `${stripped.slice(0, -3)}y`
+    : stripped.endsWith("s") && !stripped.endsWith("ss") && stripped.length > 3 ? stripped.slice(0, -1)
+    : stripped;
+}
+
+function extractStringList(parsed: Record<string, unknown> | null, field: string): string[] {
+  const value = parsed?.[field];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function buildQuestionDebatePeerResponse(turn: QuestionDebateTurn): string {
+  const sections = [
+    `SUMMARY: ${turn.summary}`,
+    "",
+    "CURRENT CANDIDATE QUESTIONS:",
+    ...turn.synthesizedQuestions.map((question) => [
+      `${question.priority}. ${question.text}`,
+      `Rationale: ${question.rationale}`,
+      question.context ? `Context: ${question.context}` : null,
+      question.recommendation ? `Recommendation: ${question.recommendation}` : null,
+      question.recommendationReasoning ? `Recommendation reasoning: ${question.recommendationReasoning}` : null
+    ].filter(Boolean).join("\n"))
+  ];
+
+  if (turn.disagreements.length > 0) {
+    sections.push("", "REMAINING DISAGREEMENTS:", ...turn.disagreements.map((item) => `- ${item}`));
+  }
+
+  if (turn.questionsForHuman.length > 0) {
+    sections.push("", "QUESTIONS FOR HUMAN:", ...turn.questionsForHuman.map((item) => `- ${item}`));
+  }
+
+  return sections.join("\n");
+}
+
+function hasReachedQuestionConsensus(turns: QuestionDebateTurn[]): boolean {
+  if (turns.length < 2) return false;
+
+  const latest = turns.at(-1);
+  const previous = turns.at(-2);
+  if (!latest || !previous) return false;
+
+  return latest.disagreements.length === 0
+    && previous.disagreements.length === 0;
+}
+
+function buildQuestionDebateNarrative(
+  turns: QuestionDebateTurn[],
+  stopReason: DebateTrace["stopReason"],
+  finalDisagreements: string[],
+  finalQuestions: Array<ProposedQuestion & { id: string; proposedBy: "synthesized" }>
+): string {
+  const header =
+    stopReason === "consensus"
+      ? "Question debate reached full agreement."
+      : stopReason === "questions_for_human"
+        ? "Question debate paused because the models need clarification from the human."
+        : "Question debate stopped at the turn cap before full agreement.";
+
+  const sections = [header, ""];
+
+  for (const turn of turns) {
+    sections.push(`## ${turn.actor === "gpt" ? "Dr. Chen (GPT)" : "Dr. Rivera (Claude)"}`);
+    sections.push(turn.rawText || turn.summary);
+    if (turn.disagreements.length > 0) {
+      sections.push("", "Remaining disagreements:");
+      sections.push(...turn.disagreements.map((item) => `- ${item}`));
+    }
+    if (turn.questionsForHuman.length > 0) {
+      sections.push("", "Clarification needed:");
+      sections.push(...turn.questionsForHuman.map((item) => `- ${item}`));
+    }
+    sections.push("");
+  }
+
+  sections.push("## Current question list");
+  sections.push(...finalQuestions.map((question) => [
+    `${question.priority}. ${question.text}`,
+    `   Why it matters: ${question.rationale}`,
+    question.context ? `   Plain-English context: ${question.context}` : null,
+    question.recommendation ? `   Crossfire recommendation: ${question.recommendation}` : null,
+    question.recommendationReasoning ? `   Why Crossfire recommends this: ${question.recommendationReasoning}` : null
+  ].filter(Boolean).join("\n")));
+
+  if (finalDisagreements.length > 0) {
+    sections.push("", "## Unresolved disagreements");
+    sections.push(...finalDisagreements.map((item, index) => `${index + 1}. ${item}`));
+  }
+
+  return sections.join("\n").trim();
+}
+
+function ensureAuthorityInputFits(input: {
+  sessionId: string;
+  runId?: string;
+  phase: PhaseValidationPhase;
+  component: string;
+  text: string;
+  budgetChars: number;
+  errorCode: AuthorityInputTooLargeError["code"];
+}) {
+  if (input.text.length <= input.budgetChars) {
+    return;
+  }
+
+  emitProgress({
+    sessionId: input.sessionId,
+    runId: input.runId,
+    type: "info",
+    phase: input.phase,
+    metadata: {
+      blockedReason: input.errorCode,
+      authorityInput: {
+        component: input.component,
+        actualChars: input.text.length,
+        budgetChars: input.budgetChars
+      }
+    },
+    message: `${input.errorCode.replaceAll("_", " ")}: ${input.component} exceeded the prompt budget`
+  });
+
+  throw new AuthorityInputTooLargeError(
+    input.errorCode,
+    input.component,
+    input.text.length,
+    input.budgetChars
+  );
+}
+
+function collectFinalDisagreements(turns: Array<{
+  disagreements: string[];
+}>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const turn of turns) {
+    for (const disagreement of turn.disagreements) {
+      const normalized = disagreement.toLowerCase().trim();
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      result.push(disagreement);
+    }
+  }
+
+  return result;
+}
+
+function buildBalancedApproachNarrative(
+  finalTurns: Array<{
+    actor: "gpt" | "claude";
+    rawText: string;
+    proposedSpecDelta: string;
+  }>,
+  stopReason: string,
+  finalDisagreements: string[]
+): string {
+  if (finalTurns.length === 0) {
+    return "No approach debate output.";
+  }
+
+  const sections: string[] = [];
+  if (stopReason === "consensus" && finalDisagreements.length === 0) {
+    sections.push("Both models reached full mutual agreement. Final endorsed positions:");
+  } else if (stopReason === "max_turns" && finalDisagreements.length > 0) {
+    sections.push("The debate hit the maximum turn cap before full agreement. Final positions from both models are preserved below.");
+  } else if (stopReason === "questions_for_human") {
+    sections.push("The debate paused because the models need clarification from the human.");
+  }
+
+  for (const turn of finalTurns) {
+    const actorLabel = turn.actor === "gpt" ? "Dr. Chen (GPT)" : "Dr. Rivera (Claude)";
+    sections.push(`## ${actorLabel}\n${turn.rawText}`);
+    if (turn.proposedSpecDelta) {
+      sections.push(`### Proposed spec delta\n${turn.proposedSpecDelta}`);
+    }
+  }
+
+  if (finalDisagreements.length > 0) {
+    sections.push([
+      "## Remaining disagreements",
+      ...finalDisagreements.map((disagreement, index) => `${index + 1}. ${disagreement}`)
+    ].join("\n"));
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildCanonicalApproachHandoff(
+  finalTurns: Array<{
+    actor: "gpt" | "claude";
+    summary: string;
+    proposedSpecDelta: string;
+  }>,
+  stopReason: DebateTrace["stopReason"],
+  finalDisagreements: string[]
+): string {
+  const sections = [
+    "# Final Approach Handoff",
+    "",
+    `Status: ${stopReason.replaceAll("_", " ")}`,
+    ""
+  ];
+
+  for (const turn of finalTurns) {
+    sections.push(`## ${turn.actor === "gpt" ? "GPT final position" : "Claude final position"}`);
+    sections.push(turn.proposedSpecDelta || turn.summary);
+    sections.push("");
+  }
+
+  if (finalDisagreements.length > 0) {
+    sections.push("## Remaining disagreements");
+    sections.push(...finalDisagreements.map((item, index) => `${index + 1}. ${item}`));
+    sections.push("");
+  }
+
+  return sections.join("\n").trim();
 }

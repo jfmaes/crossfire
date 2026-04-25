@@ -112,12 +112,16 @@ function shutdown(code: number = 0) {
   shuttingDown = true;
 
   const children = [daemon, web].filter(Boolean) as ChildProcess[];
-  for (const child of children) child.kill("SIGTERM");
+  const exited = new Set<ChildProcess>();
+  for (const child of children) {
+    child.once("exit", () => exited.add(child));
+    child.kill("SIGTERM");
+  }
 
   // Escalate to SIGKILL if children don't exit, then force-quit.
   setTimeout(() => {
     for (const child of children) {
-      if (!child.killed) child.kill("SIGKILL");
+      if (!exited.has(child) && child.exitCode === null) child.kill("SIGKILL");
     }
     process.exit(code);
   }, 2000);

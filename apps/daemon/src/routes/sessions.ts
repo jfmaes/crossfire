@@ -1,16 +1,23 @@
 import type { FastifyInstance } from "fastify";
 import { SessionConflictError } from "../services/session-service";
 
+const MAX_APPROACH_DEBATE_TURNS = 30;
+
 interface SessionService {
-  createSession(input: { title: string; prompt: string }): Promise<Record<string, unknown>>;
+  createSession(input: {
+    title: string;
+    prompt: string;
+    executionPolicy?: { approachDebateMaxTurns?: number };
+  }): Promise<Record<string, unknown>>;
   continueSession(input: { id: string; humanResponse: string }): Promise<Record<string, unknown> | null>;
   restartSession(id: string): Promise<Record<string, unknown> | null>;
+  rewindSession(id: string): Promise<Record<string, unknown> | null>;
   deleteSession(id: string): void;
   listSessions(): Array<{ id: string; title: string; status: string; phase?: string | null }>;
   getSession(id: string): Promise<Record<string, unknown> | null>;
-  exportSession(id: string): Record<string, unknown> | null;
-  getRun(id: string): Record<string, unknown> | null;
-  listRunEvents(runId: string): Array<Record<string, unknown>>;
+  exportSession?(id: string): Record<string, unknown> | null;
+  getRun(id: string): unknown | null;
+  listRunEvents(runId: string): Array<unknown>;
 }
 
 export async function registerSessionRoutes(
@@ -29,13 +36,28 @@ export async function registerSessionRoutes(
     const body = request.body as Record<string, unknown> | null;
     const title = typeof body?.title === "string" ? body.title.trim() : "";
     const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+    const requestedApproachDebateMaxTurns =
+      typeof body?.executionPolicy === "object" && body.executionPolicy
+        ? (body.executionPolicy as Record<string, unknown>).approachDebateMaxTurns
+        : undefined;
+    const executionPolicy =
+      typeof requestedApproachDebateMaxTurns === "number" && Number.isFinite(requestedApproachDebateMaxTurns)
+        ? {
+            approachDebateMaxTurns: Math.min(
+              MAX_APPROACH_DEBATE_TURNS,
+              Math.max(1, Math.floor(requestedApproachDebateMaxTurns))
+            )
+          }
+        : typeof body?.executionPolicy === "object" && body.executionPolicy
+          ? {}
+          : undefined;
 
     if (!title || !prompt) {
       return reply.code(400).send({ error: "title and prompt are required" });
     }
 
     try {
-      const created = await input.sessionService.createSession({ title, prompt });
+      const created = await input.sessionService.createSession({ title, prompt, executionPolicy });
       return reply.code(responseCode(created, 202, 201)).send(created);
     } catch (error) {
       request.log.error(error, "session creation failed");
@@ -108,6 +130,30 @@ export async function registerSessionRoutes(
     }
   });
 
+  app.post("/sessions/:id/rewind", async (request, reply) => {
+    if (!input.sessionService) {
+      return reply.code(503).send({ error: "session service unavailable" });
+    }
+
+    const params = request.params as { id: string };
+
+    try {
+      const result = await input.sessionService.rewindSession(params.id);
+
+      if (!result) {
+        return reply.code(404).send({ error: "not found" });
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      if (error instanceof SessionConflictError) {
+        return reply.code(409).send({ error: "session is already processing" });
+      }
+      request.log.error(error, "session rewind failed");
+      return reply.code(500).send({ error: "session rewind failed" });
+    }
+  });
+
   app.delete("/sessions/:id", async (request, reply) => {
     if (!input.sessionService) {
       return reply.code(503).send({ error: "session service unavailable" });
@@ -139,7 +185,7 @@ export async function registerSessionRoutes(
   });
 
   app.get("/sessions/:id/export", async (request, reply) => {
-    if (!input.sessionService) {
+    if (!input.sessionService?.exportSession) {
       return reply.code(503).send({ error: "session service unavailable" });
     }
 

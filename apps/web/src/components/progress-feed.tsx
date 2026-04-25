@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getRunEvents } from "../lib/api";
+import { getRunEvents, type ProgressEventMetadata } from "../lib/api";
 
 interface ProgressEvent {
   sessionId: string;
@@ -11,6 +11,7 @@ interface ProgressEvent {
   turnNumber?: number;
   elapsedMs?: number;
   disagreements?: number;
+  metadata?: ProgressEventMetadata | null;
 }
 
 interface TimedProgressEvent extends ProgressEvent {
@@ -61,7 +62,7 @@ function describeActivity(input: { model?: string; phase?: string; turnNumber?: 
   }
 
   if (input.phase === "analysis_debate") {
-    return "Synthesizing interview questions";
+    return "Debating interview questions";
   }
 
   if (input.phase === "interview") {
@@ -73,6 +74,108 @@ function describeActivity(input: { model?: string; phase?: string; turnNumber?: 
   }
 
   return "Working";
+}
+
+function formatEventLabel(type: string): string | null {
+  switch (type) {
+    case "model_progress":
+      return "Progress";
+    case "model_stream":
+      return "CLI";
+    default:
+      return null;
+  }
+}
+
+function formatStopReason(reason?: string | null): string | null {
+  switch (reason) {
+    case "consensus":
+      return "outcome: consensus reached";
+    case "questions_for_human":
+      return "outcome: clarification needed";
+    case "max_turns":
+      return "outcome: turn cap reached";
+    case "phase_invalid_turn":
+      return "outcome: invalid turn";
+    case "spec_generation_input_too_large":
+      return "blocked: spec input too large";
+    case "revision_input_too_large":
+      return "blocked: revision input too large";
+    default:
+      return reason ? `outcome: ${reason.replaceAll("_", " ")}` : null;
+  }
+}
+
+function isAuthorityPathComponent(component?: string | null): boolean {
+  return component === "approachResult" || component === "peerDraft" || component === "revisionPeerDraft";
+}
+
+function isWarningBadge(badge: string): boolean {
+  return badge.includes("degraded") ||
+    badge.includes("phase-invalid") ||
+    badge.includes("provider-error") ||
+    badge.includes("blocked:") ||
+    badge.includes("reused context") ||
+    badge.includes("compacted");
+}
+
+function eventMetadataBadges(event: Pick<ProgressEvent, "phase" | "metadata">): string[] {
+  const metadata = event.metadata;
+  if (!metadata) return [];
+
+  const badges: string[] = [];
+  if (metadata.outputStatus === "degraded") badges.push("degraded");
+  if (metadata.outputStatus === "phase_invalid") badges.push("phase-invalid");
+  if (metadata.outputStatus === "provider_error") badges.push("provider-error");
+  if (metadata.conversationReused === true) {
+    badges.push("reused context");
+  } else if (
+    metadata.freshContext === true ||
+    metadata.startedFromFreshContext === true ||
+    ((event.phase === "spec_generation" || event.phase === "walkthrough") && metadata.conversationReused === false)
+  ) {
+    badges.push("fresh context");
+  }
+  const stopReasonValue = metadata.blockedReason ?? metadata.stopReason;
+  if (stopReasonValue && typeof stopReasonValue === "string") {
+    const stopReason = formatStopReason(stopReasonValue);
+    if (stopReason) badges.push(stopReason);
+  }
+  if (typeof metadata.finalDisagreementCount === "number" && metadata.finalDisagreementCount > 0) {
+    badges.push(`open disagreements: ${metadata.finalDisagreementCount}`);
+  }
+  if (metadata.canonicalApproachHandoff === true || metadata.usedCanonicalApproachHandoff === true) {
+    badges.push("canonical handoff");
+  }
+  if (metadata.authorityPathUncompacted === true) {
+    badges.push("authority path uncompressed");
+  }
+  if (metadata.blockedByOversize === true || metadata.oversizeBlocking === true) {
+    badges.push("blocked: authority input too large");
+  }
+  if (metadata.compaction) {
+    if (isAuthorityPathComponent(metadata.compaction.component)) {
+      badges.push(`authority input compacted: ${metadata.compaction.component}`);
+    } else {
+      const ratio = metadata.compaction.originalChars > 0
+      ? Math.round((1 - (metadata.compaction.finalChars / metadata.compaction.originalChars)) * 100)
+      : 0;
+      badges.push(`compacted ${metadata.compaction.component}${ratio > 0 ? ` ${ratio}%` : ""}`);
+    }
+  } else if (metadata.compacted === true) {
+    badges.push(
+      isAuthorityPathComponent(metadata.component)
+        ? `authority input compacted${metadata.component ? `: ${metadata.component}` : ""}`
+        : "compacted"
+    );
+  }
+
+  const promptLedger = metadata.promptLedger ?? [];
+  if (!metadata.compaction && promptLedger.some((entry) => entry.compacted === true)) {
+    badges.push("prompt compacted");
+  }
+
+  return badges;
 }
 
 export function ProgressFeed({
@@ -90,6 +193,8 @@ export function ProgressFeed({
 }) {
   const [events, setEvents] = useState<TimedProgressEvent[]>([]);
   const [now, setNow] = useState(Date.now());
+  const logRef = useRef<HTMLDivElement>(null);
+  const prevEventCount = useRef(0);
 
   useEffect(() => {
     setEvents([]);
@@ -161,10 +266,6 @@ export function ProgressFeed({
     return () => window.clearInterval(interval);
   }, [events.length]);
 
-  if (events.length === 0 && !pendingState) {
-    return null;
-  }
-
   const activeStates = new Map<string, ActiveModelState>();
 
   for (const event of events) {
@@ -182,7 +283,7 @@ export function ProgressFeed({
       continue;
     }
 
-    if (event.type === "model_stream" && event.model) {
+    if ((event.type === "model_stream" || event.type === "model_progress") && event.model) {
       const existing = activeStates.get(key);
       activeStates.set(key, {
         key,
@@ -213,15 +314,16 @@ export function ProgressFeed({
         } as TimedProgressEvent]
       : [];
 
-  const logRef = useRef<HTMLDivElement>(null);
-  const prevEventCount = useRef(0);
-
   useEffect(() => {
     if (visibleEvents.length > prevEventCount.current && logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
     prevEventCount.current = visibleEvents.length;
   }, [visibleEvents.length]);
+
+  if (events.length === 0 && !pendingState) {
+    return null;
+  }
 
   function formatTime(ts: number): string {
     const d = new Date(ts);
@@ -286,7 +388,16 @@ export function ProgressFeed({
           <div key={e.id ?? i} className={`progress-feed__event progress-feed__event--${e.type}`}>
             <span className="progress-feed__timestamp">{formatTime(e.receivedAt)}</span>
             {e.model && <span className={`progress-feed__model progress-feed__model--${e.model}`}>{e.model.toUpperCase()}</span>}
+            {formatEventLabel(e.type) && <span className="progress-feed__event-label">{formatEventLabel(e.type)}</span>}
             <span className="progress-feed__message">{e.message}</span>
+            {eventMetadataBadges(e).map((badge) => (
+              <span
+                key={badge}
+                className={`progress-feed__meta-badge ${isWarningBadge(badge) ? "progress-feed__meta-badge--warning" : ""}`}
+              >
+                {badge}
+              </span>
+            ))}
           </div>
         ))}
       </div>

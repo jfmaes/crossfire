@@ -21,6 +21,54 @@ function defaultSpawnProcess(command: string, args: string[]): SpawnedChild {
   });
 }
 
+function checkCliVersion(input: {
+  command: string;
+  spawnProcess: (command: string, args: string[]) => SpawnedChild;
+  timeoutMs: number;
+}): Promise<{ ok: boolean; detail: string }> {
+  return new Promise((resolve) => {
+    const child = input.spawnProcess(input.command, ["--version"]);
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+    let settled = false;
+
+    const finish = (result: { ok: boolean; detail: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish({ ok: false, detail: `${input.command} --version timed out` });
+    }, input.timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutChunks.push(chunk.toString());
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk.toString());
+    });
+    child.on("error", (error: Error) => {
+      finish({ ok: false, detail: `${input.command} unavailable: ${error.message}` });
+    });
+    child.on("close", (code?: number | null) => {
+      const stdout = stdoutChunks.join("").trim();
+      const stderr = stderrChunks.join("").trim();
+      if (code === 0) {
+        finish({ ok: true, detail: stdout || `${input.command} available` });
+        return;
+      }
+
+      finish({
+        ok: false,
+        detail: stderr || stdout || `${input.command} --version exited with code ${code ?? "unknown"}`
+      });
+    });
+  });
+}
+
 interface ExtractedResult {
   text: string | null;
   cliSessionId?: string;
@@ -146,6 +194,10 @@ export class ClaudeCliProcess implements ClaudeProcess {
   }
 
   async healthCheck() {
-    return { ok: true, detail: `${this.command} configured` };
+    return checkCliVersion({
+      command: this.command,
+      spawnProcess: this.spawnProcess,
+      timeoutMs: Math.min(this.timeoutMs, 5_000)
+    });
   }
 }

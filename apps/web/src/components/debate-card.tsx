@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { DebateTrace } from "../lib/api";
 import { MarkdownContent } from "./markdown-content";
 
 interface DebateTurn {
@@ -20,9 +21,26 @@ interface DebateCardProps {
   summary: string;
   turns?: DebateTurn[];
   convergedApproach?: string;
+  questionsForHuman?: string[];
   canSubmitFeedback?: boolean;
   onSubmitFeedback?: (feedback: string) => void;
   feedbackLoading?: boolean;
+  trace?: DebateTrace;
+}
+
+function formatStopReason(reason?: string | null): string | null {
+  switch (reason) {
+    case "consensus":
+      return "Consensus reached";
+    case "questions_for_human":
+      return "Clarification needed";
+    case "max_turns":
+      return "Turn cap reached";
+    case "phase_invalid_turn":
+      return "Invalid turn output";
+    default:
+      return reason ? reason.replaceAll("_", " ") : null;
+  }
 }
 
 /**
@@ -31,7 +49,6 @@ interface DebateCardProps {
  * or "### Challenge N: title\nbody..."
  */
 function parseChallenges(text: string): Challenge[] {
-  // Match lines that start a challenge section
   const regex = /(?:^|\n)\s*(?:\*\*|#{1,4}\s*)?Challenge\s+(\d+)\s*[:.]?\s*(.*?)(?:\*\*)?(?:\n|$)/gi;
   const matches = [...text.matchAll(regex)];
 
@@ -86,15 +103,20 @@ function collectDisagreementTimeline(turns: DebateTurn[]): Array<{
   raisedInTurn: number;
   resolvedInTurn: number | null;
 }> {
-  const seen = new Map<string, { raisedBy: string; raisedInTurn: number; lastSeenTurn: number }>();
+  const seen = new Map<string, { text: string; raisedBy: string; raisedInTurn: number; lastSeenTurn: number }>();
 
   turns.forEach((turn, i) => {
     const turnNum = i + 1;
     if (turn.disagreements) {
-      for (const d of turn.disagreements) {
-        const key = d.toLowerCase().trim();
+      for (const disagreement of turn.disagreements) {
+        const key = disagreement.toLowerCase().trim();
         if (!seen.has(key)) {
-          seen.set(key, { raisedBy: turn.actor, raisedInTurn: turnNum, lastSeenTurn: turnNum });
+          seen.set(key, {
+            text: disagreement,
+            raisedBy: turn.actor,
+            raisedInTurn: turnNum,
+            lastSeenTurn: turnNum
+          });
         } else {
           seen.get(key)!.lastSeenTurn = turnNum;
         }
@@ -103,11 +125,11 @@ function collectDisagreementTimeline(turns: DebateTurn[]): Array<{
   });
 
   const totalTurns = turns.length;
-  return [...seen.entries()].map(([, info]) => ({
-    text: [...seen.entries()].find(([, v]) => v === info)![0],
-    raisedBy: info.raisedBy,
-    raisedInTurn: info.raisedInTurn,
-    resolvedInTurn: info.lastSeenTurn < totalTurns ? info.lastSeenTurn + 1 : null
+  return [...seen.values()].map((item) => ({
+    text: item.text,
+    raisedBy: item.raisedBy,
+    raisedInTurn: item.raisedInTurn,
+    resolvedInTurn: item.lastSeenTurn < totalTurns ? item.lastSeenTurn + 1 : null
   }));
 }
 
@@ -117,43 +139,70 @@ export function DebateCard({
   summary,
   turns,
   convergedApproach,
+  questionsForHuman,
   canSubmitFeedback,
   onSubmitFeedback,
-  feedbackLoading
+  feedbackLoading,
+  trace
 }: DebateCardProps) {
   const challenges = convergedApproach ? parseChallenges(convergedApproach) : [];
   const [challengeFeedback, setChallengeFeedback] = useState<Record<number, string>>({});
   const [generalFeedback, setGeneralFeedback] = useState("");
   const timeline = turns ? collectDisagreementTimeline(turns) : [];
+  const clarificationQuestions = questionsForHuman ?? trace?.questionsForHuman ?? [];
+  const finalDisagreements = trace?.finalDisagreements ?? [];
+  const turnsUsed = trace?.turnsUsed ?? trace?.totalTurns;
+  const clarificationNeeded = trace?.stopReason === "questions_for_human" || clarificationQuestions.length > 0;
+  const unresolvedAtTurnCap = trace?.stopReason === "max_turns" && finalDisagreements.length > 0;
+  const requiresExplicitDecision = clarificationNeeded || unresolvedAtTurnCap;
 
   function handleFeedbackChange(challengeNum: number, value: string) {
     setChallengeFeedback((prev) => ({ ...prev, [challengeNum]: value }));
   }
 
+  const challengeFeedbackParts = challenges.flatMap((challenge) => {
+    const feedback = challengeFeedback[challenge.number]?.trim();
+    return feedback ? [`[Challenge ${challenge.number}: ${challenge.title}]\n${feedback}`] : [];
+  });
+  const generalFeedbackTrimmed = generalFeedback.trim();
+  const hasAnyFeedback = challengeFeedbackParts.length > 0 || generalFeedbackTrimmed.length > 0;
+
   function handleSubmit() {
     if (!onSubmitFeedback) return;
 
-    const parts: string[] = [];
+    const parts = [...challengeFeedbackParts];
 
-    // Collect per-challenge feedback
-    for (const challenge of challenges) {
-      const fb = challengeFeedback[challenge.number]?.trim();
-      if (fb) {
-        parts.push(`[Challenge ${challenge.number}: ${challenge.title}]\n${fb}`);
-      }
+    if (generalFeedbackTrimmed) {
+      parts.push(`[General feedback]\n${generalFeedbackTrimmed}`);
     }
 
-    // Add general feedback
-    if (generalFeedback.trim()) {
-      parts.push(`[General feedback]\n${generalFeedback.trim()}`);
-    }
+    const fallback = requiresExplicitDecision
+      ? ""
+      : "Approved — proceed to spec generation";
+    const combined = parts.length > 0 ? parts.join("\n\n") : fallback;
 
-    // If no per-challenge feedback but general feedback, just send that
-    const combined = parts.length > 0 ? parts.join("\n\n") : generalFeedback.trim() || "Approved — proceed to spec generation";
+    if (!combined) return;
     onSubmitFeedback(combined);
   }
 
-  // Pre-text before challenges (if convergedApproach has text before first challenge)
+  function submitLabel(): string {
+    if (clarificationNeeded) return "Submit clarification & continue debate";
+    if (unresolvedAtTurnCap) return "Submit decision & continue";
+    return "Submit feedback & generate spec";
+  }
+
+  function loadingLabel(): string {
+    if (clarificationNeeded) return "Continuing debate with your clarification...";
+    if (unresolvedAtTurnCap) return "Continuing with your decision...";
+    return "Generating spec from approach...";
+  }
+
+  function feedbackPlaceholder(): string {
+    if (clarificationNeeded) return "Provide the clarification the models asked for...";
+    if (unresolvedAtTurnCap) return "State your judgment or direction for how Crossfire should proceed...";
+    return "General feedback on the approach (optional)...";
+  }
+
   let preText = "";
   if (convergedApproach && challenges.length > 0) {
     const firstChallengeMatch = convergedApproach.match(/(?:\*\*|#{1,4}\s*)?Challenge\s+\d+/i);
@@ -169,7 +218,82 @@ export function DebateCard({
         <span className="card__badge">{badge}</span>
       </div>
 
-      {/* Debate turns with disagreement counts */}
+      {trace && (
+        <div className="trace-summary">
+          <div className="trace-pill-row">
+            {formatStopReason(trace.stopReason) && (
+              <span className={`trace-pill ${unresolvedAtTurnCap || clarificationNeeded ? "trace-pill--warning" : ""}`}>
+                Outcome: {formatStopReason(trace.stopReason)}
+              </span>
+            )}
+            {typeof turnsUsed === "number" && typeof trace.maxTurns === "number" && (
+              <span className="trace-pill">Turns: {turnsUsed}/{trace.maxTurns}</span>
+            )}
+            {typeof trace.finalDisagreementCount === "number" && (
+              <span className={`trace-pill ${trace.finalDisagreementCount > 0 ? "trace-pill--warning" : ""}`}>
+                Final disagreements: {trace.finalDisagreementCount}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {clarificationNeeded && (
+        <section className="debate-unresolved">
+          <div className="debate-unresolved__header">
+            <div>
+              <span className="debate-unresolved__badge">Clarification needed</span>
+              <h3 className="debate-unresolved__title">The debate paused for your input</h3>
+            </div>
+            <span className="debate-unresolved__count">
+              {clarificationQuestions.length} open
+            </span>
+          </div>
+
+          <p className="debate-unresolved__summary">
+            The models stopped because they need clarification before they can reach a stable approach. Answer the open questions below, then continue the debate.
+          </p>
+
+          {clarificationQuestions.length > 0 && (
+            <ol className="debate-unresolved__list">
+              {clarificationQuestions.map((question, index) => (
+                <li key={question} className="debate-unresolved__item">
+                  <span className="debate-unresolved__item-number">{index + 1}</span>
+                  <span className="debate-unresolved__item-text">{question}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+      )}
+
+      {unresolvedAtTurnCap && (
+        <section className="debate-unresolved">
+          <div className="debate-unresolved__header">
+            <div>
+              <span className="debate-unresolved__badge">Needs human judgment</span>
+              <h3 className="debate-unresolved__title">Remaining disagreements</h3>
+            </div>
+            <span className="debate-unresolved__count">
+              {finalDisagreements.length} open
+            </span>
+          </div>
+
+          <p className="debate-unresolved__summary">
+            The models reached the maximum debate length before they fully agreed. Review the unresolved points below before deciding whether to continue, rewind, or proceed anyway.
+          </p>
+
+          <ol className="debate-unresolved__list">
+            {finalDisagreements.map((disagreement, index) => (
+              <li key={disagreement} className="debate-unresolved__item">
+                <span className="debate-unresolved__item-number">{index + 1}</span>
+                <span className="debate-unresolved__item-text">{disagreement}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
       {turns && turns.length > 0 && (
         <div className="checkpoint-section">
           <h3>Debate turns</h3>
@@ -189,8 +313,8 @@ export function DebateCard({
                   <MarkdownContent text={turn.summary} />
                   {turn.disagreements && turn.disagreements.length > 0 && (
                     <ul className="debate-turn__disagreement-list">
-                      {turn.disagreements.map((d, j) => (
-                        <li key={j}>{d}</li>
+                      {turn.disagreements.map((disagreement, index) => (
+                        <li key={index}>{disagreement}</li>
                       ))}
                     </ul>
                   )}
@@ -201,20 +325,19 @@ export function DebateCard({
         </div>
       )}
 
-      {/* Disagreement timeline */}
       {timeline.length > 0 && (
         <div className="checkpoint-section">
           <h3>Disagreement resolution</h3>
           <div className="disagreement-timeline">
-            {timeline.map((item, i) => (
-              <div key={i} className={`disagreement-item ${item.resolvedInTurn ? "disagreement-item--resolved" : "disagreement-item--open"}`}>
+            {timeline.map((item, index) => (
+              <div key={index} className={`disagreement-item ${item.resolvedInTurn ? "disagreement-item--resolved" : "disagreement-item--open"}`}>
                 <span className="disagreement-item__status">
                   {item.resolvedInTurn ? "Resolved" : "Open"}
                 </span>
                 <span className="disagreement-item__text">{item.text}</span>
                 <span className="disagreement-item__meta">
                   Raised by {item.raisedBy === "gpt" ? "Dr. Chen" : "Dr. Rivera"} (turn {item.raisedInTurn})
-                  {item.resolvedInTurn ? ` — resolved by turn ${item.resolvedInTurn}` : ""}
+                  {item.resolvedInTurn ? ` - resolved by turn ${item.resolvedInTurn}` : ""}
                 </span>
               </div>
             ))}
@@ -222,7 +345,6 @@ export function DebateCard({
         </div>
       )}
 
-      {/* Challenges rendered individually */}
       {challenges.length > 0 && (
         <div className="checkpoint-section">
           <h3>Challenges &amp; consensus</h3>
@@ -260,7 +382,7 @@ export function DebateCard({
                         className="challenge-card__feedback-input"
                         placeholder={`Feedback on challenge ${challenge.number} (optional)...`}
                         value={challengeFeedback[challenge.number] || ""}
-                        onChange={(e) => handleFeedbackChange(challenge.number, e.target.value)}
+                        onChange={(event) => handleFeedbackChange(challenge.number, event.target.value)}
                         rows={2}
                       />
                     </div>
@@ -272,7 +394,6 @@ export function DebateCard({
         </div>
       )}
 
-      {/* If no structured challenges found, show the full converged approach inline */}
       {convergedApproach && challenges.length === 0 && (
         <div className="checkpoint-section">
           <h3>Converged approach</h3>
@@ -282,35 +403,36 @@ export function DebateCard({
         </div>
       )}
 
-      {/* Summary (full, no truncation) */}
       {summary && summary !== convergedApproach && (
         <div className="debate-summary">
           <MarkdownContent text={summary} />
         </div>
       )}
 
-      {/* Feedback submission */}
       {canSubmitFeedback && onSubmitFeedback && (
         <div className="challenge-feedback-submit">
           <textarea
             className="challenge-card__feedback-input challenge-card__feedback-input--general"
-            placeholder="General feedback on the approach (optional)..."
+            placeholder={feedbackPlaceholder()}
             value={generalFeedback}
-            onChange={(e) => setGeneralFeedback(e.target.value)}
+            onChange={(event) => setGeneralFeedback(event.target.value)}
             rows={3}
           />
+          {requiresExplicitDecision && !hasAnyFeedback && (
+            <p className="question-source">Human input is required before Crossfire can continue from this checkpoint.</p>
+          )}
           <button
             className="challenge-feedback-submit__btn"
             onClick={handleSubmit}
-            disabled={feedbackLoading}
+            disabled={feedbackLoading || (requiresExplicitDecision && !hasAnyFeedback)}
           >
             {feedbackLoading ? (
               <span className="btn-loading">
                 <span className="spinner" />
-                Generating spec from approach...
+                {loadingLabel()}
               </span>
             ) : (
-              "Submit feedback & generate spec"
+              submitLabel()
             )}
           </button>
         </div>

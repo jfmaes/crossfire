@@ -46,6 +46,24 @@ function createFakeChild({
 }
 
 describe("ClaudeCliProcess", () => {
+  it("checks Claude CLI availability with --version", async () => {
+    let capturedArgs: string[] = [];
+    const runner = new ClaudeCliProcess({
+      spawnProcess: (_command, args) => {
+        capturedArgs = args;
+        return createFakeChild({
+          stdoutLines: ["1.2.3 (Claude Code)"]
+        });
+      }
+    });
+
+    await expect(runner.healthCheck()).resolves.toEqual({
+      ok: true,
+      detail: "1.2.3 (Claude Code)"
+    });
+    expect(capturedArgs).toEqual(["--version"]);
+  });
+
   it("parses stream-json output and returns the final result text", async () => {
     const runner = new ClaudeCliProcess({
       spawnProcess: () =>

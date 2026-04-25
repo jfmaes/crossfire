@@ -4,6 +4,7 @@ export interface CodexTransport {
     prompt: string;
     resumeThreadId?: string;
   }): AsyncGenerator<
+    | { kind: "progress"; text: string }
     | { kind: "stderr"; text: string }
     | { kind: "error"; message: string }
     | { kind: "result"; text: string }
