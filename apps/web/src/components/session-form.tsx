@@ -6,6 +6,7 @@ interface SessionFormProps {
   placeholder?: string;
   submitLabel?: string;
   loadingLabel?: string;
+  showGrounding?: boolean;
 }
 
 export function SessionForm(input: SessionFormProps) {
@@ -69,6 +70,11 @@ export function SessionForm(input: SessionFormProps) {
           {navigator.platform.includes("Mac") ? "\u2318" : "Ctrl"}+Enter to submit
         </span>
       </div>
+      {input.showGrounding && (
+        <div className="session-form__grounding-note">
+          If daemon grounding is configured, Crossfire will automatically include relevant local file context.
+        </div>
+      )}
     </form>
   );
 }

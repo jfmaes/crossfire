@@ -4,7 +4,7 @@ import type { ProviderAdapter, ProviderTurnInput } from "../base/provider-adapte
 export class FakeProvider implements ProviderAdapter {
   constructor(public readonly name: "gpt" | "claude") {}
 
-  async *sendTurn(_input: ProviderTurnInput) {
+  async *sendTurn(input: ProviderTurnInput) {
     const turn: ModelTurn = {
       actor: this.name,
       rawText: `${this.name} raw response`,
@@ -14,14 +14,14 @@ export class FakeProvider implements ProviderAdapter {
       disagreements: [],
       questionsForPeer: [],
       questionsForHuman: [],
-      proposedSpecDelta: `${this.name} delta`,
-      milestoneReached: null,
-      implementationPlan: null,
-      proposedQuestions: null,
-      synthesizedQuestions: null,
+      proposedSpecDelta: input.phase === "spec_generation" ? `${this.name} spec` : `${this.name} delta`,
+      milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+      implementationPlan: input.phase === "spec_generation" ? `${this.name} implementation plan` : null,
+      proposedQuestions: input.phase === "analysis" ? [] : null,
+      synthesizedQuestions: input.phase === "analysis_debate" ? [] : null,
       followUpQuestions: null,
       sufficientContext: null,
-      walkthroughGaps: null,
+      walkthroughGaps: input.phase === "walkthrough" ? [] : null,
       degraded: false
     };
 
@@ -30,7 +30,8 @@ export class FakeProvider implements ProviderAdapter {
     yield {
       type: "structured_turn",
       actor: this.name,
-      turn
+      turn,
+      rawResponse: JSON.stringify(turn)
     } as const;
     yield { type: "done" } as const;
   }

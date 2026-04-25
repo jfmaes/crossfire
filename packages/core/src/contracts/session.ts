@@ -30,6 +30,9 @@ export const interviewQuestionSchema = z.object({
   text: z.string(),
   priority: z.number(),
   rationale: z.string(),
+  context: z.string().nullable().optional(),
+  recommendation: z.string().nullable().optional(),
+  recommendationReasoning: z.string().nullable().optional(),
   proposedBy: z.enum(["gpt", "claude", "synthesized"]),
   answer: z.string().nullable()
 });
@@ -37,7 +40,10 @@ export const interviewQuestionSchema = z.object({
 const proposedQuestionSchema = z.object({
   text: z.string(),
   priority: z.number(),
-  rationale: z.string()
+  rationale: z.string(),
+  context: z.string().nullable().optional(),
+  recommendation: z.string().nullable().optional(),
+  recommendationReasoning: z.string().nullable().optional()
 });
 
 const walkthroughGapSchema = z.object({

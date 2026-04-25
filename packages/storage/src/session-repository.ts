@@ -1,11 +1,16 @@
 import type Database from "better-sqlite3";
 
+export interface ExecutionPolicy {
+  approachDebateMaxTurns?: number;
+}
+
 export interface SessionRow {
   id: string;
   title: string;
   status: string;
   phase?: string | null;
   prompt?: string | null;
+  executionPolicy?: ExecutionPolicy | null;
 }
 
 export interface InterviewQuestionRow {
@@ -14,6 +19,9 @@ export interface InterviewQuestionRow {
   text: string;
   priority: number;
   rationale: string;
+  context?: string | null;
+  recommendation?: string | null;
+  recommendationReasoning?: string | null;
   proposedBy: string;
   answer: string | null;
   sortOrder: number;
@@ -47,6 +55,7 @@ export interface SessionRunEventRow {
   turnNumber?: number | null;
   elapsedMs?: number | null;
   disagreements?: number | null;
+  metadata?: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -65,13 +74,14 @@ export class SessionRepository {
 
   create(session: SessionRow): void {
     this.db
-      .prepare("INSERT INTO sessions (id, title, status, phase, prompt) VALUES (@id, @title, @status, @phase, @prompt)")
+      .prepare("INSERT INTO sessions (id, title, status, phase, prompt, execution_policy) VALUES (@id, @title, @status, @phase, @prompt, @executionPolicy)")
       .run({
         id: session.id,
         title: session.title,
         status: session.status,
         phase: session.phase ?? null,
-        prompt: session.prompt ?? null
+        prompt: session.prompt ?? null,
+        executionPolicy: session.executionPolicy ? JSON.stringify(session.executionPolicy) : null
       });
   }
 
@@ -88,15 +98,31 @@ export class SessionRepository {
   }
 
   findById(id: string): SessionRow | undefined {
-    return this.db
-      .prepare("SELECT id, title, status, phase, prompt FROM sessions WHERE id = ?")
-      .get(id) as SessionRow | undefined;
+    const row = this.db
+      .prepare("SELECT id, title, status, phase, prompt, execution_policy as executionPolicyJson FROM sessions WHERE id = ?")
+      .get(id) as (Omit<SessionRow, "executionPolicy"> & { executionPolicyJson?: string | null }) | undefined;
+
+    if (!row) return undefined;
+
+    const { executionPolicyJson, ...session } = row;
+    return {
+      ...session,
+      executionPolicy: executionPolicyJson ? JSON.parse(executionPolicyJson) : null
+    };
   }
 
   findAll(): SessionRow[] {
-    return this.db
-      .prepare("SELECT id, title, status, phase FROM sessions ORDER BY rowid DESC")
-      .all() as SessionRow[];
+    const rows = this.db
+      .prepare("SELECT id, title, status, phase, execution_policy as executionPolicyJson FROM sessions ORDER BY rowid DESC")
+      .all() as Array<Omit<SessionRow, "executionPolicy"> & { executionPolicyJson?: string | null }>;
+
+    return rows.map((row) => {
+      const { executionPolicyJson, ...session } = row;
+      return {
+        ...session,
+        executionPolicy: executionPolicyJson ? JSON.parse(executionPolicyJson) : null
+      };
+    });
   }
 
   saveSummary(summary: SessionSummaryRow): void {
@@ -174,12 +200,39 @@ export class SessionRepository {
 
   saveInterviewQuestions(questions: InterviewQuestionRow[]): void {
     const stmt = this.db.prepare(`
-      INSERT INTO interview_questions (id, session_id, text, priority, rationale, proposed_by, answer, sort_order)
-      VALUES (@id, @sessionId, @text, @priority, @rationale, @proposedBy, @answer, @sortOrder)
+      INSERT INTO interview_questions (
+        id,
+        session_id,
+        text,
+        priority,
+        rationale,
+        context,
+        recommendation,
+        recommendation_reasoning,
+        proposed_by,
+        answer,
+        sort_order
+      )
+      VALUES (
+        @id,
+        @sessionId,
+        @text,
+        @priority,
+        @rationale,
+        @context,
+        @recommendation,
+        @recommendationReasoning,
+        @proposedBy,
+        @answer,
+        @sortOrder
+      )
       ON CONFLICT(id) DO UPDATE SET
         text = excluded.text,
         priority = excluded.priority,
         rationale = excluded.rationale,
+        context = excluded.context,
+        recommendation = excluded.recommendation,
+        recommendation_reasoning = excluded.recommendation_reasoning,
         proposed_by = excluded.proposed_by,
         answer = excluded.answer,
         sort_order = excluded.sort_order
@@ -193,6 +246,9 @@ export class SessionRepository {
           text: q.text,
           priority: q.priority,
           rationale: q.rationale,
+          context: q.context ?? null,
+          recommendation: q.recommendation ?? null,
+          recommendationReasoning: q.recommendationReasoning ?? null,
           proposedBy: q.proposedBy,
           answer: q.answer,
           sortOrder: q.sortOrder
@@ -212,6 +268,9 @@ export class SessionRepository {
           text,
           priority,
           rationale,
+          context,
+          recommendation,
+          recommendation_reasoning as recommendationReasoning,
           proposed_by as proposedBy,
           answer,
           sort_order as sortOrder
@@ -236,11 +295,37 @@ export class SessionRepository {
       .run(sessionId);
   }
 
+  deletePhaseResult(sessionId: string, phase: string): void {
+    this.db
+      .prepare("DELETE FROM phase_results WHERE session_id = ? AND phase = ?")
+      .run(sessionId, phase);
+  }
+
   recoverStaleDebatingSessions(): number {
-    const result = this.db
-      .prepare("UPDATE sessions SET status = 'errored' WHERE status = 'debating'")
-      .run();
-    return result.changes;
+    const recover = this.db.transaction(() => {
+      const finishedAt = new Date().toISOString();
+      this.db
+        .prepare(`
+          UPDATE session_runs
+          SET
+            status = 'failed',
+            finished_at = @finishedAt,
+            error_message = 'daemon stopped before this run completed'
+          WHERE finished_at IS NULL
+            AND session_id IN (
+              SELECT id FROM sessions WHERE status = 'debating'
+            )
+        `)
+        .run({ finishedAt });
+
+      const result = this.db
+        .prepare("UPDATE sessions SET status = 'errored' WHERE status = 'debating'")
+        .run();
+
+      return result.changes;
+    });
+
+    return recover();
   }
 
   deleteSession(id: string): void {
@@ -415,13 +500,45 @@ export class SessionRepository {
       .all(sessionId, limit) as SessionRunRow[];
   }
 
+  findRunEvents(runId: string, limit = 100): SessionRunEventRow[] {
+    const rows = this.db
+      .prepare(`
+        SELECT
+          id,
+          run_id as runId,
+          session_id as sessionId,
+          type,
+          message,
+          model,
+          phase,
+          turn_number as turnNumber,
+          elapsed_ms as elapsedMs,
+          disagreements,
+          metadata_json as metadataJson,
+          created_at as createdAt
+        FROM session_run_events
+        WHERE run_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+      `)
+      .all(runId, limit) as Array<Omit<SessionRunEventRow, "metadata"> & { metadataJson?: string | null }>;
+
+    return rows.map((row) => {
+      const { metadataJson, ...event } = row;
+      return {
+        ...event,
+        metadata: metadataJson ? JSON.parse(metadataJson) : null
+      };
+    });
+  }
+
   saveRunEvent(event: SessionRunEventRow): void {
     this.db
       .prepare(`
         INSERT INTO session_run_events (
-          id, run_id, session_id, type, message, model, phase, turn_number, elapsed_ms, disagreements, created_at
+          id, run_id, session_id, type, message, model, phase, turn_number, elapsed_ms, disagreements, metadata_json, created_at
         ) VALUES (
-          @id, @runId, @sessionId, @type, @message, @model, @phase, @turnNumber, @elapsedMs, @disagreements, @createdAt
+          @id, @runId, @sessionId, @type, @message, @model, @phase, @turnNumber, @elapsedMs, @disagreements, @metadataJson, @createdAt
         )
       `)
       .run({
@@ -435,30 +552,8 @@ export class SessionRepository {
         turnNumber: event.turnNumber ?? null,
         elapsedMs: event.elapsedMs ?? null,
         disagreements: event.disagreements ?? null,
+        metadataJson: event.metadata ? JSON.stringify(event.metadata) : null,
         createdAt: event.createdAt
       });
-  }
-
-  findRunEvents(runId: string, limit = 100): SessionRunEventRow[] {
-    return this.db
-      .prepare(`
-        SELECT
-          id,
-          run_id as runId,
-          session_id as sessionId,
-          type,
-          message,
-          model,
-          phase,
-          turn_number as turnNumber,
-          elapsed_ms as elapsedMs,
-          disagreements,
-          created_at as createdAt
-        FROM session_run_events
-        WHERE run_id = ?
-        ORDER BY created_at ASC
-        LIMIT ?
-      `)
-      .all(runId, limit) as SessionRunEventRow[];
   }
 }

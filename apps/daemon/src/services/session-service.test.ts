@@ -15,7 +15,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function createDelayedQuestionProvider(name: "gpt" | "claude", delayMs = 25): ProviderAdapter {
   return {
     name,
-    async *sendTurn(_input: ProviderTurnInput) {
+    async *sendTurn(input: ProviderTurnInput) {
       await delay(delayMs);
 
       const turn: ModelTurn = {
@@ -26,19 +26,23 @@ function createDelayedQuestionProvider(name: "gpt" | "claude", delayMs = 25): Pr
         assumptions: [],
         disagreements: [],
         questionsForPeer: [],
-        questionsForHuman: ["What is the target platform?"],
-        proposedSpecDelta: "",
-        milestoneReached: null,
-        implementationPlan: null,
-        proposedQuestions: null,
-        synthesizedQuestions: null,
+        questionsForHuman: input.phase === "analysis" ? ["What is the target platform?"] : [],
+        proposedSpecDelta: input.phase === "spec_generation" ? `${name} spec` : "",
+        milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+        implementationPlan: input.phase === "spec_generation" ? `${name} implementation plan` : null,
+        proposedQuestions: input.phase === "analysis"
+          ? [{ text: "What is the target platform?", priority: 1, rationale: "Need scope" }]
+          : null,
+        synthesizedQuestions: input.phase === "analysis_debate"
+          ? [{ text: "What is the target platform?", priority: 1, rationale: "Need scope" }]
+          : null,
         followUpQuestions: null,
         sufficientContext: null,
-        walkthroughGaps: null,
+        walkthroughGaps: input.phase === "walkthrough" ? [] : null,
         degraded: false
       };
 
-      yield { type: "structured_turn", actor: name, turn } as const;
+      yield { type: "structured_turn", actor: name, turn, rawResponse: JSON.stringify(turn) } as const;
       yield { type: "done" } as const;
     },
     async healthCheck() {
@@ -153,19 +157,19 @@ describe("createSessionService", () => {
           assumptions: [],
           disagreements: [],
           questionsForPeer: [],
-          questionsForHuman: [],
-          proposedSpecDelta: "",
-          milestoneReached: null,
-          implementationPlan: null,
-          proposedQuestions: null,
-          synthesizedQuestions: null,
+          questionsForHuman: input.phase === "analysis" ? ["What is the target platform?"] : [],
+          proposedSpecDelta: input.phase === "spec_generation" ? "grounded spec" : "",
+          milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+          implementationPlan: input.phase === "spec_generation" ? "grounded implementation plan" : null,
+          proposedQuestions: input.phase === "analysis" ? [{ text: "What is the target platform?", priority: 1, rationale: "Need scope" }] : null,
+          synthesizedQuestions: input.phase === "analysis_debate" ? [{ text: "What is the target platform?", priority: 1, rationale: "Need scope" }] : null,
           followUpQuestions: null,
           sufficientContext: null,
-          walkthroughGaps: null,
+          walkthroughGaps: input.phase === "walkthrough" ? [] : null,
           degraded: false
         };
 
-        yield { type: "structured_turn", actor: "gpt", turn } as const;
+        yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
         yield { type: "done" } as const;
       }
 
@@ -216,9 +220,14 @@ describe("createSessionService", () => {
     expect(restarted!.session.status).toBe("debating");
     expect(restarted!.interviewState?.questions).toHaveLength(0);
 
-    await delay(120);
-
-    const rerun = await service.getSession(created.session.id);
+    let rerun: Awaited<ReturnType<typeof service.getSession>> = await waitForSettledSession(service, created.session.id);
+    for (let i = 0; rerun?.session.phase !== "interview" && i < 20; i++) {
+      await delay(25);
+      rerun = await service.getSession(created.session.id);
+      if (rerun?.activeRun) {
+        rerun = await waitForSettledSession(service, created.session.id);
+      }
+    }
     expect(rerun).not.toBeNull();
     expect(rerun!.session.phase).toBe("interview");
     expect(rerun!.interviewState?.questions.length).toBeGreaterThan(0);
@@ -253,5 +262,89 @@ describe("createSessionService", () => {
 
     const original = await service.getSession(created.session.id);
     expect(original?.session.status).toBe("finalized");
+  });
+
+  it("rewinds approach debate back to interview without restarting the whole session", async () => {
+    const service = createSessionService({
+      repository: new SessionRepository(createInMemoryDatabase()),
+      gpt: createDelayedQuestionProvider("gpt"),
+      claude: createDelayedQuestionProvider("claude")
+    });
+
+    const created = await service.createSession({
+      title: "Rewindable debate",
+      prompt: "Design a system"
+    });
+
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
+
+    const rewound = await service.rewindSession(created.session.id);
+
+    expect(rewound).not.toBeNull();
+    expect(rewound!.session.phase).toBe("interview");
+    expect(rewound!.session.status).toBe("interviewing");
+    expect(rewound!.interviewState?.questions.length).toBeGreaterThan(0);
+  });
+
+  it("rewinds spec generation back to the saved approach debate checkpoint", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    const service = createSessionService({
+      repository,
+      gpt: createDelayedQuestionProvider("gpt"),
+      claude: createDelayedQuestionProvider("claude")
+    });
+
+    const created = await service.createSession({
+      title: "Rewindable spec",
+      prompt: "Design a system"
+    });
+
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "Looks good" });
+    await waitForSettledSession(service, created.session.id);
+
+    expect(repository.findPhaseResult(created.session.id, "spec_generation")).toBeDefined();
+
+    const rewound = await service.rewindSession(created.session.id);
+
+    expect(rewound).not.toBeNull();
+    expect(rewound!.session.phase).toBe("approach_debate");
+    expect(["checkpoint", "waiting_for_human"]).toContain(rewound!.session.status);
+    expect(repository.findPhaseResult(created.session.id, "spec_generation")).toBeUndefined();
+  });
+
+  it("marks a background run errored when post-processing fails", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "council-artifact-failure-"));
+    const artifactDirectory = path.join(tempDir, "not-a-directory");
+    await writeFile(artifactDirectory, "occupied");
+
+    const service = createSessionService({
+      repository: new SessionRepository(createInMemoryDatabase()),
+      gpt: createDelayedQuestionProvider("gpt"),
+      claude: createDelayedQuestionProvider("claude"),
+      artifactsDirectory: artifactDirectory
+    });
+
+    const created = await service.createSession({
+      title: "Artifact failure",
+      prompt: "Design a system"
+    });
+
+    await waitForSettledSession(service, created.session.id);
+    await service.continueSession({ id: created.session.id, humanResponse: "enough" });
+    await waitForSettledSession(service, created.session.id);
+
+    const started = await service.continueSession({
+      id: created.session.id,
+      humanResponse: "Looks good"
+    });
+    expect(started?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, created.session.id);
+    expect(settled.session.status).toBe("errored");
   });
 });

@@ -49,6 +49,9 @@ describe("SessionRepository — phase/interview extensions", () => {
           text: "What is the scope?",
           priority: 1,
           rationale: "Defines boundaries",
+          context: "In plain English, this decides what the first version is actually responsible for.",
+          recommendation: "Start with a narrow v1 scope.",
+          recommendationReasoning: "That reduces brownfield risk and speeds validation.",
           proposedBy: "gpt",
           answer: null,
           sortOrder: 0
@@ -59,6 +62,9 @@ describe("SessionRepository — phase/interview extensions", () => {
           text: "What is the tech stack?",
           priority: 2,
           rationale: "Constrains implementation",
+          context: "This affects how much new infrastructure the team must own.",
+          recommendation: "Prefer the existing stack unless a hard blocker appears.",
+          recommendationReasoning: "Reuse lowers migration and onboarding cost.",
           proposedBy: "claude",
           answer: null,
           sortOrder: 1
@@ -68,6 +74,7 @@ describe("SessionRepository — phase/interview extensions", () => {
       const questions = repo.findInterviewQuestions("s1");
       expect(questions).toHaveLength(2);
       expect(questions[0].text).toBe("What is the scope?");
+      expect(questions[0].recommendation).toBe("Start with a narrow v1 scope.");
       expect(questions[1].text).toBe("What is the tech stack?");
     });
 
@@ -81,6 +88,9 @@ describe("SessionRepository — phase/interview extensions", () => {
         text: "What is the scope?",
         priority: 1,
         rationale: "Defines boundaries",
+        context: null,
+        recommendation: null,
+        recommendationReasoning: null,
         proposedBy: "gpt",
         answer: null,
         sortOrder: 0
@@ -102,6 +112,9 @@ describe("SessionRepository — phase/interview extensions", () => {
         text: "Original question",
         priority: 1,
         rationale: "Original rationale",
+        context: "Original context",
+        recommendation: "Original recommendation",
+        recommendationReasoning: "Original reasoning",
         proposedBy: "gpt",
         answer: null,
         sortOrder: 0
@@ -113,6 +126,9 @@ describe("SessionRepository — phase/interview extensions", () => {
         text: "Updated question",
         priority: 2,
         rationale: "Updated rationale",
+        context: "Updated context",
+        recommendation: "Updated recommendation",
+        recommendationReasoning: "Updated reasoning",
         proposedBy: "synthesized",
         answer: null,
         sortOrder: 0
@@ -121,6 +137,7 @@ describe("SessionRepository — phase/interview extensions", () => {
       const questions = repo.findInterviewQuestions("s1");
       expect(questions).toHaveLength(1);
       expect(questions[0].text).toBe("Updated question");
+      expect(questions[0].recommendationReasoning).toBe("Updated reasoning");
     });
   });
 

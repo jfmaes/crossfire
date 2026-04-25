@@ -9,7 +9,8 @@ function applySchema(db: Database.Database) {
       title TEXT NOT NULL,
       status TEXT NOT NULL,
       phase TEXT,
-      prompt TEXT
+      prompt TEXT,
+      execution_policy TEXT
     );
 
     CREATE TABLE IF NOT EXISTS session_summaries (
@@ -29,6 +30,9 @@ function applySchema(db: Database.Database) {
       text TEXT NOT NULL,
       priority INTEGER NOT NULL,
       rationale TEXT NOT NULL,
+      context TEXT,
+      recommendation TEXT,
+      recommendation_reasoning TEXT,
       proposed_by TEXT NOT NULL,
       answer TEXT,
       sort_order INTEGER NOT NULL,
@@ -66,6 +70,7 @@ function applySchema(db: Database.Database) {
       turn_number INTEGER,
       elapsed_ms INTEGER,
       disagreements INTEGER,
+      metadata_json TEXT,
       created_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES session_runs(id),
       FOREIGN KEY (session_id) REFERENCES sessions(id)
@@ -85,6 +90,27 @@ function migrateIfNeeded(db: Database.Database) {
   }
   if (!columnNames.includes("prompt")) {
     db.exec("ALTER TABLE sessions ADD COLUMN prompt TEXT");
+  }
+  if (!columnNames.includes("execution_policy")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN execution_policy TEXT");
+  }
+
+  const interviewQuestionColumns = db.pragma("table_info(interview_questions)") as Array<{ name: string }>;
+  const interviewQuestionColumnNames = interviewQuestionColumns.map((c) => c.name);
+  if (!interviewQuestionColumnNames.includes("context")) {
+    db.exec("ALTER TABLE interview_questions ADD COLUMN context TEXT");
+  }
+  if (!interviewQuestionColumnNames.includes("recommendation")) {
+    db.exec("ALTER TABLE interview_questions ADD COLUMN recommendation TEXT");
+  }
+  if (!interviewQuestionColumnNames.includes("recommendation_reasoning")) {
+    db.exec("ALTER TABLE interview_questions ADD COLUMN recommendation_reasoning TEXT");
+  }
+
+  const runEventColumns = db.pragma("table_info(session_run_events)") as Array<{ name: string }>;
+  const runEventColumnNames = runEventColumns.map((c) => c.name);
+  if (!runEventColumnNames.includes("metadata_json")) {
+    db.exec("ALTER TABLE session_run_events ADD COLUMN metadata_json TEXT");
   }
 }
 

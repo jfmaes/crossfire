@@ -12,9 +12,16 @@ export interface ProviderTurnInput {
 
 export type NormalizedProviderEvent =
   | { type: "status"; value: "started" | "streaming" }
+  | { type: "progress"; text: string }
   | { type: "stderr"; text: string }
   | { type: "error"; message: string }
-  | { type: "structured_turn"; actor: "gpt" | "claude"; turn: ModelTurn }
+  | {
+      type: "structured_turn";
+      actor: "gpt" | "claude";
+      turn: ModelTurn;
+      rawResponse: string;
+      conversationReused?: boolean;
+    }
   | { type: "done" };
 
 export interface ProviderAdapter {

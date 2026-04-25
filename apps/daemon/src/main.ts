@@ -3,10 +3,12 @@ import { createDatabase, createInMemoryDatabase, SessionRepository } from "@coun
 import { createSessionService } from "./services/session-service";
 import { buildServer } from "./server";
 import { enableDebugLogging } from "./services/debug-log";
+import { resolveAccessToken } from "./config";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
-const accessToken = process.env.COUNCIL_ACCESS_TOKEN || "local-dev-token";
+const accessTokenConfig = resolveAccessToken(process.env);
+const accessToken = accessTokenConfig.accessToken;
 const providerMode = process.env.COUNCIL_PROVIDER_MODE ?? "real";
 const databasePath = process.env.COUNCIL_DATABASE_PATH ?? "data/council.sqlite";
 const groundingRoot = process.env.COUNCIL_GROUNDING_ROOT;
@@ -63,7 +65,7 @@ const app = buildServer({
 const address = await app.listen({ port, host });
 
 console.log(`Crossfire daemon listening on ${address} (${providerMode} providers${codexFastMode ? ", codex fast mode" : ""})`);
-if (!process.env.COUNCIL_ACCESS_TOKEN) {
-  console.log(`  Using default access token: ${accessToken}`);
-  console.log(`  Set COUNCIL_ACCESS_TOKEN in your environment to use a custom token.`);
+if (accessTokenConfig.generated) {
+  console.log(`  Generated access token: ${accessToken}`);
+  console.log(`  Set COUNCIL_ACCESS_TOKEN in your environment to use a stable token.`);
 }

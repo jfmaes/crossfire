@@ -3,13 +3,14 @@ type ProgressListener = (event: ProgressEvent) => void;
 export interface ProgressEvent {
   sessionId: string;
   runId?: string;
-  type: "phase_start" | "model_start" | "model_done" | "model_stream" | "phase_done" | "consensus" | "info";
+  type: "phase_start" | "model_start" | "model_done" | "model_stream" | "model_progress" | "phase_done" | "consensus" | "info";
   message: string;
   model?: "gpt" | "claude";
   phase?: string;
   turnNumber?: number;
   elapsedMs?: number;
   disagreements?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export function summarizeProgressText(text: string, maxLength = 220): string {

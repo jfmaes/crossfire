@@ -1,19 +1,22 @@
 import type { ProviderAdapter, ProviderTurnInput } from "../base/provider-adapter";
 import { buildStructuredTurnPrompt } from "../prompts/structured-turn";
-import { parseStructuredTurn } from "../structured-turn";
+import { detectProviderFailureText, parseStructuredTurn } from "../structured-turn";
 import type { CodexTransport } from "./codex-transport";
 
 export class CodexAdapter implements ProviderAdapter {
   readonly name = "gpt";
 
   /**
-   * Tracks Codex thread IDs for conversation resumption within multi-turn phases.
-   * Key: "sessionId:phase", Value: Codex thread_id.
+   * Tracks Codex thread IDs only for the unphased approach-debate path.
    *
-   * Codex `exec resume` works within the same conversational context (e.g. multiple
-   * debate turns) but fails when the prompt structure changes completely (e.g.
-   * debate → spec generation returns 0 chars). So we track per-phase, and only
-   * resume for phases that have multiple turns within the same conversation.
+   * Crossfire's hard reuse policy is broader than this cache and is enforced
+   * by orchestration before another resumed turn is attempted: same provider
+   * (implicit here because this cache is Codex-only), same phase family,
+   * same behavioral contract, same response-schema expectations, a confirmed
+   * Codex resume path, and a previous turn that was neither degraded nor
+   * phase-invalid. In this pass, the only Codex path that satisfies those
+   * gates is the unphased approach debate; every phase-specific prompt starts
+   * from fresh context.
    */
   private readonly threadIds = new Map<string, string>();
 
@@ -22,14 +25,6 @@ export class CodexAdapter implements ProviderAdapter {
   async *sendTurn(input: ProviderTurnInput) {
     yield { type: "status", value: "started" } as const;
 
-    // Only resume within the same phase context.
-    // "debate" = approach debate (no phase set, uses orchestrator).
-    // "analysis_debate" = question debate (multi-turn, same phase key).
-    // Single-shot phases (analysis, interview, spec_generation) always start fresh.
-    // Codex `exec resume` only works reliably for the approach debate
-    // (non-phase path where the adapter builds the prompt with omitContext).
-    // Phase-specific calls pass pre-built prompts with full context which
-    // confuses codex when resumed — returns 0 chars. So only resume for debate.
     const debateKey = `${input.sessionId}:debate`;
     const resumeThreadId = input.phase ? undefined : this.threadIds.get(debateKey);
     const canOmitContext = !!resumeThreadId;
@@ -50,6 +45,11 @@ export class CodexAdapter implements ProviderAdapter {
       prompt,
       resumeThreadId
     })) {
+      if (event.kind === "progress") {
+        yield { type: "progress", text: event.text } as const;
+        continue;
+      }
+
       if (event.kind === "stderr") {
         yield { type: "stderr", text: event.text } as const;
         continue;
@@ -67,10 +67,21 @@ export class CodexAdapter implements ProviderAdapter {
         continue;
       }
 
+      const turn = parseStructuredTurn("gpt", event.text);
+      if (turn.degraded) {
+        const providerFailure = detectProviderFailureText(event.text);
+        if (providerFailure) {
+          yield { type: "error", message: providerFailure } as const;
+          continue;
+        }
+      }
+
       yield {
         type: "structured_turn",
         actor: "gpt",
-        turn: parseStructuredTurn("gpt", event.text)
+        turn,
+        rawResponse: event.text,
+        conversationReused: canOmitContext
       } as const;
     }
 

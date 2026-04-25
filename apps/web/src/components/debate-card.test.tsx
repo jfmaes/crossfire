@@ -37,7 +37,7 @@ describe("DebateCard", () => {
     expect(screen.getByText("CRDTs have trade-offs with large documents")).toBeTruthy();
   });
 
-  it("renders converged approach inline (no details collapse)", () => {
+  it("renders converged approach inline when there are no structured challenges", () => {
     render(
       <DebateCard
         title="Approach Debate"
@@ -75,34 +75,52 @@ describe("DebateCard", () => {
     expect(screen.getByText("C2")).toBeTruthy();
   });
 
-  it("shows disagreement counts per turn", () => {
+  it("shows clarification-needed state and requires explicit input", () => {
     render(
       <DebateCard
         title="Approach Debate"
         badge="Phase 3"
         summary="Summary"
-        turns={[
-          { actor: "gpt", summary: "Initial analysis", disagreements: [] },
-          { actor: "claude", summary: "Counter analysis", disagreements: ["Cache invalidation risk", "Missing auth"] }
-        ]}
-      />
-    );
-    expect(screen.getByText("0 disagreements")).toBeTruthy();
-    expect(screen.getByText("2 disagreements")).toBeTruthy();
-  });
-
-  it("renders feedback inputs when canSubmitFeedback is true", () => {
-    render(
-      <DebateCard
-        title="Approach Debate"
-        badge="Phase 3"
-        summary="Summary"
-        convergedApproach="**Challenge 1: Test challenge**\nBody text."
         canSubmitFeedback={true}
         onSubmitFeedback={() => {}}
+        questionsForHuman={["Which deployment environment is authoritative?"]}
+        trace={{
+          stopReason: "questions_for_human",
+          turnsUsed: 3,
+          maxTurns: 6
+        }}
       />
     );
-    expect(screen.getByText("Submit feedback & generate spec")).toBeTruthy();
-    expect(screen.getByPlaceholderText("Feedback on challenge 1 (optional)...")).toBeTruthy();
+
+    expect(screen.getByText("Clarification needed")).toBeTruthy();
+    expect(screen.getByText("The debate paused for your input")).toBeTruthy();
+    expect(screen.getByText("Which deployment environment is authoritative?")).toBeTruthy();
+    const button = screen.getByRole("button", { name: "Submit clarification & continue debate" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+
+  it("shows unresolved max-turn state with decision-specific submit copy", () => {
+    render(
+      <DebateCard
+        title="Approach Debate"
+        badge="Phase 3"
+        summary="Summary"
+        canSubmitFeedback={true}
+        onSubmitFeedback={() => {}}
+        trace={{
+          stopReason: "max_turns",
+          turnsUsed: 6,
+          maxTurns: 6,
+          finalDisagreementCount: 2,
+          finalDisagreements: ["Cache invalidation risk", "Missing auth rollback"]
+        }}
+      />
+    );
+
+    expect(screen.getByText("Needs human judgment")).toBeTruthy();
+    expect(screen.getByText("Remaining disagreements")).toBeTruthy();
+    expect(screen.getByText("Cache invalidation risk")).toBeTruthy();
+    expect(screen.getByText("Missing auth rollback")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Submit decision & continue" })).toBeTruthy();
   });
 });

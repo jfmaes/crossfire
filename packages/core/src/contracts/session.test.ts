@@ -15,7 +15,16 @@ describe("session contracts", () => {
       proposedSpecDelta: "Add hybrid checkpointing",
       milestoneReached: null,
       implementationPlan: null,
-      proposedQuestions: null,
+      proposedQuestions: [
+        {
+          text: "Should Crossfire manage authoritative artifacts or advisory notes?",
+          priority: 1,
+          rationale: "This changes whether the system needs freshness and invalidation guarantees.",
+          context: "In plain English: should the saved files be the official source of truth or just helpful notes?",
+          recommendation: "Prefer authoritative machine-managed artifacts.",
+          recommendationReasoning: "That is safer for brownfield work because stale notes can mislead later runs."
+        }
+      ],
       synthesizedQuestions: null,
       followUpQuestions: null,
       sufficientContext: null,

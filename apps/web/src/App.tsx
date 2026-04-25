@@ -15,6 +15,7 @@ import {
   createSession,
   continueSession,
   restartSession,
+  rewindSession,
   deleteSession,
   exportSession,
   getHealth,
@@ -47,6 +48,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [debateFeedbackLoading, setDebateFeedbackLoading] = useState(false);
   const [restartingSessionId, setRestartingSessionId] = useState<string | null>(null);
+  const [rewindingSessionId, setRewindingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [progressResetToken, setProgressResetToken] = useState(0);
   const [restartStartedAt, setRestartStartedAt] = useState<number | null>(null);
@@ -206,6 +208,32 @@ export function App() {
   }
 
   const phase = session?.session.phase;
+  const approachDebatePhaseResult = phase === "approach_debate"
+    ? (session?.phaseResult as {
+        convergedApproach?: string;
+        questionsForHuman?: string[];
+        trace?: {
+          stopReason?: string;
+          totalTurns?: number;
+          turnsUsed?: number;
+          maxTurns?: number;
+          finalDisagreementCount?: number;
+          finalDisagreements?: string[];
+        };
+      } | undefined)
+    : undefined;
+  const approachDebateTrace = approachDebatePhaseResult?.trace;
+  const approachClarificationQuestions = approachDebatePhaseResult?.questionsForHuman ?? [];
+  const unresolvedDebateCount =
+    approachDebateTrace?.finalDisagreements?.length
+    ?? approachDebateTrace?.finalDisagreementCount
+    ?? 0;
+  const approachNeedsClarification =
+    approachDebateTrace?.stopReason === "questions_for_human" ||
+    approachClarificationQuestions.length > 0;
+  const approachHitTurnCap =
+    approachDebateTrace?.stopReason === "max_turns" &&
+    unresolvedDebateCount > 0;
 
   const canContinue =
     !session?.activeRun &&
@@ -216,6 +244,12 @@ export function App() {
       session?.session.status === "errored"
     );
 
+  const canRewindPhase =
+    !!session &&
+    !session.activeRun &&
+    session.session.status !== "finalized" &&
+    (phase === "approach_debate" || phase === "spec_generation");
+
   const isFinalized = session?.session.status === "finalized";
   const showCheckpointCard =
     !!session &&
@@ -225,7 +259,11 @@ export function App() {
 
   // Scroll to action area when checkpoint appears
   useEffect(() => {
-    if (showCheckpointCard && actionRef.current) {
+    if (
+      showCheckpointCard
+      && actionRef.current
+      && typeof actionRef.current.scrollIntoView === "function"
+    ) {
       actionRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [showCheckpointCard]);
@@ -236,7 +274,7 @@ export function App() {
   }
 
   async function handleRestartSession(id: string) {
-    if (restartingSessionId === id) {
+    if (restartingSessionId === id || rewindingSessionId === id) {
       return;
     }
 
@@ -302,7 +340,7 @@ export function App() {
   }
 
   async function handleDeleteSession(id: string) {
-    if (deletingSessionId === id || restartingSessionId === id) {
+    if (deletingSessionId === id || restartingSessionId === id || rewindingSessionId === id) {
       return;
     }
 
@@ -318,6 +356,29 @@ export function App() {
       setError(err instanceof Error ? err.message : "Failed to delete session");
     } finally {
       setDeletingSessionId(null);
+    }
+  }
+
+  async function handleRewindSession(id: string) {
+    if (rewindingSessionId === id || restartingSessionId === id || deletingSessionId === id) {
+      return;
+    }
+
+    setError(null);
+    setRewindingSessionId(id);
+    try {
+      const payload = await rewindSession({ sessionId: id, token });
+      setPreviousSessions((prev) => prev.map((s) =>
+        s.id === id ? { ...s, status: payload.session.status, phase: payload.session.phase } : s
+      ));
+      setSessionAndNavigate(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rewind session");
+      if (session?.session.id === id) {
+        await loadSession(id).catch(() => {});
+      }
+    } finally {
+      setRewindingSessionId(null);
     }
   }
 
@@ -369,7 +430,7 @@ export function App() {
     if (phase === "interview") {
       return {
         label: "Your answer",
-        placeholder: 'Answer the question above, or type "enough" to skip remaining questions.',
+        placeholder: 'Answer in your own words, use Crossfire\'s recommendation, or type "enough" to skip remaining questions.',
         submitLabel: "Submit answer",
         loadingLabel: "Models evaluating your answer..."
       };
@@ -393,6 +454,17 @@ export function App() {
     };
   }
 
+  function getRewindLabel(): string {
+    switch (phase) {
+      case "approach_debate":
+        return "Back to interview";
+      case "spec_generation":
+        return "Back to approach";
+      default:
+        return "Go back one phase";
+    }
+  }
+
   function getPhaseExplanation(): string {
     if (isFinalized) return "Session complete. The spec has been approved and finalized.";
     if (session && restartingSessionId === session.session.id && phase === "analysis") {
@@ -401,7 +473,7 @@ export function App() {
     if (session?.activeRun) {
       switch (phase) {
         case "analysis":
-          return "Both models are in Phase 1, analyzing the problem independently before they synthesize interview questions.";
+          return "Both models are in Phase 1, analyzing the problem independently before they align on the interview question set.";
         case "approach_debate":
           return "The models are actively debating the best technical approach based on the interview answers.";
         case "spec_generation":
@@ -413,11 +485,17 @@ export function App() {
 
     switch (phase) {
       case "analysis":
-        return "Both models are back in Phase 1, analyzing the problem independently before they synthesize interview questions.";
+        return "Both models are back in Phase 1, analyzing the problem independently before they align on the interview question set.";
       case "interview":
-        return "Both models analyzed your problem independently. Now they're interviewing you to understand your constraints. Answer each question — your answers directly shape the architecture.";
+        return "Both models analyzed your problem independently. Now they're interviewing you to understand your constraints. Each question includes plain-language context and Crossfire's current recommendation, so you can either answer directly or let the models make the call.";
       case "approach_debate":
-        return "Using your interview answers, the models debated the best technical approach until they reached consensus.";
+        if (approachHitTurnCap) {
+          return `The models hit the debate turn cap with ${unresolvedDebateCount} unresolved disagreement${unresolvedDebateCount === 1 ? "" : "s"}. Review them, then decide whether to continue, rewind, or restart.`;
+        }
+        if (approachNeedsClarification) {
+          return "The models stopped because they need clarification from you before they can reach full agreement.";
+        }
+        return "Using your interview answers, the models debated the best technical approach until they reached a stable shared plan.";
       case "spec_generation":
         return "GPT drafted a specification, Claude reviewed and refined it. Review the spec below.";
       default:
@@ -439,9 +517,15 @@ export function App() {
       case "analysis":
         return "Crossfire is rebuilding the session from the start. You do not need to provide input yet.";
       case "interview":
-        return 'Answer the question above, or type "enough" to skip to the approach debate.';
+        return 'Answer the question above in your own words, use Crossfire\'s recommendation if you want the models to decide, or type "enough" to skip to the approach debate.';
       case "approach_debate":
-        return 'Review the converged approach, then click "Continue session" to generate the spec.';
+        if (approachHitTurnCap) {
+          return "Review the remaining disagreements and provide explicit guidance below, or rewind to interview, or restart from scratch.";
+        }
+        if (approachNeedsClarification) {
+          return "Answer the clarification questions below so the models can resume the debate.";
+        }
+        return "Review the converged approach, then continue to spec generation when you are satisfied.";
       case "spec_generation":
         return 'Type "approve" to finalize, or describe what needs to change for a revision.';
       default:
@@ -466,7 +550,13 @@ export function App() {
           <>
             {renderAnalysisCard()}
             {session.interviewState && (
-              <InterviewCard state={session.interviewState} />
+              <InterviewCard
+                state={session.interviewState}
+                onUseRecommendation={(answer) => {
+                  void handleContinue(answer);
+                }}
+                recommendationPending={Boolean(session.activeRun)}
+              />
             )}
           </>
         );
@@ -481,6 +571,15 @@ export function App() {
               summary={session.summary.currentUnderstanding}
               turns={(phaseResult.turns as Array<{ actor: string; summary: string; disagreements?: string[]; rawText?: string }>) || []}
               convergedApproach={phaseResult.convergedApproach as string}
+              questionsForHuman={(phaseResult.questionsForHuman as string[] | undefined) ?? []}
+              trace={phaseResult.trace as {
+                stopReason?: string;
+                totalTurns?: number;
+                turnsUsed?: number;
+                maxTurns?: number;
+                finalDisagreementCount?: number;
+                finalDisagreements?: string[];
+              } | undefined}
               canSubmitFeedback={isCheckpoint}
               feedbackLoading={debateFeedbackLoading}
               onSubmitFeedback={isCheckpoint ? async (feedback: string) => {
@@ -500,7 +599,46 @@ export function App() {
         if (phaseResult && "spec" in phaseResult) {
           return (
             <SpecCard
-              result={phaseResult as { spec: string; implementationPlan?: string; summary: string }}
+              result={phaseResult as {
+                spec: string;
+                implementationPlan?: string;
+                summary: string;
+                trace?: {
+                  draft?: {
+                    conversationReused?: boolean;
+                  };
+                  review?: {
+                    conversationReused?: boolean;
+                  };
+                  revision?: {
+                    conversationReused?: boolean;
+                  };
+                  revisedAfterWalkthrough?: boolean;
+                  gapCount?: number;
+                  compaction?: {
+                    approachResult?: boolean;
+                    peerDraft?: boolean;
+                    revisionPeerDraft?: boolean;
+                  };
+                  stopReason?: string | null;
+                  blockedReason?: string | null;
+                  blockedByOversize?: boolean;
+                  oversizeBlocking?: boolean;
+                  freshContext?: boolean | {
+                    draft?: boolean;
+                    review?: boolean;
+                    walkthrough?: boolean;
+                    revision?: boolean;
+                  };
+                  startedFromFreshContext?: boolean;
+                  authorityPathUncompacted?: boolean;
+                  authorityPathUncompressed?: boolean;
+                  authorityPathCompacted?: boolean;
+                  canonicalApproachHandoff?: boolean;
+                  canonicalHandoffUsed?: boolean;
+                  usedCanonicalApproachHandoff?: boolean;
+                };
+              }}
               isFinalized={session.session.status === "finalized"}
               sessionId={session.session.id}
             />
@@ -528,7 +666,7 @@ export function App() {
 
       {!session && (
         <>
-          <SessionForm onCreate={handleCreate} showGrounding loadingLabel="Analyzing problem & debating questions (GPT + Claude)..." />
+          <SessionForm onCreate={handleCreate} showGrounding loadingLabel="Analyzing problem & aligning on interview questions (GPT + Claude)..." />
           <SessionList
             sessions={previousSessions}
             onSelect={handleLoadSession}
@@ -608,7 +746,13 @@ export function App() {
 
       {showCheckpointCard && (
         <div ref={actionRef}>
-          <CheckpointCard summary={session.summary} />
+          <CheckpointCard
+            summary={session.summary}
+            phase={phase}
+            status={session.session.status}
+            stopReason={approachDebateTrace?.stopReason}
+            clarificationCount={approachClarificationQuestions.length}
+          />
         </div>
       )}
 
@@ -651,6 +795,15 @@ export function App() {
 
       {session && (
         <div className="session-actions">
+          {canRewindPhase && (
+            <button
+              className="session-actions__btn session-actions__btn--rewind"
+              onClick={() => handleRewindSession(session.session.id)}
+              disabled={rewindingSessionId === session.session.id || restartingSessionId === session.session.id}
+            >
+              {rewindingSessionId === session.session.id ? "Rewinding…" : getRewindLabel()}
+            </button>
+          )}
           <button
             className="session-actions__btn session-actions__btn--export"
             onClick={() => {
@@ -664,14 +817,14 @@ export function App() {
           <button
             className="session-actions__btn session-actions__btn--restart"
             onClick={() => handleRestartSession(session.session.id)}
-            disabled={restartingSessionId === session.session.id}
+            disabled={restartingSessionId === session.session.id || rewindingSessionId === session.session.id}
           >
             {restartingSessionId === session.session.id ? "Restarting session…" : "Restart session"}
           </button>
           <button
             className="session-actions__btn session-actions__btn--new"
             onClick={() => setSessionAndNavigate(null)}
-            disabled={restartingSessionId === session.session.id}
+            disabled={restartingSessionId === session.session.id || rewindingSessionId === session.session.id}
           >
             New session
           </button>

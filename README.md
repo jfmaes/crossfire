@@ -40,9 +40,25 @@ The daemon spawns `claude` and `codex` CLI processes and orchestrates them throu
 
 ```bash
 pnpm install
+pnpm dev
 ```
 
-Start the daemon and web frontend in separate terminals:
+That single command starts both the daemon and the web UI, waits for the daemon health check to pass, and prints a startup banner with:
+
+- Web UI: `http://localhost:5173`
+- API: `http://localhost:8787`
+- Access token: `COUNCIL_ACCESS_TOKEN` if set, otherwise `local-dev-token` for the one-command local launcher
+
+Useful variants:
+
+```bash
+pnpm start          # same launcher as pnpm dev
+pnpm start:verbose  # forward daemon + web stdout with prefixes
+```
+
+Open http://localhost:5173 and describe a problem.
+
+If you want to run the processes separately for debugging, you still can:
 
 ```bash
 # Terminal 1 -- daemon
@@ -51,8 +67,6 @@ pnpm dev:daemon
 # Terminal 2 -- web UI
 pnpm dev:web
 ```
-
-Open http://localhost:5173 and describe a problem.
 
 ## Docker (experimental)
 
@@ -63,6 +77,9 @@ Build and run with Docker Compose. The container mounts your host CLI credential
 ```bash
 # Build the frontend first (nginx serves the static build)
 pnpm install && pnpm build
+
+# Set an explicit token before exposing the Docker daemon on 0.0.0.0
+export COUNCIL_ACCESS_TOKEN="$(node -e 'console.log(require("node:crypto").randomUUID())')"
 
 # Start daemon + nginx
 docker compose up --build
@@ -194,4 +211,7 @@ packages/
   storage/src/
     database.ts                SQLite schema and migrations
     session-repository.ts      CRUD + interview questions + phase results
+
+scripts/
+  start.ts                    One-command launcher for daemon + web dev servers
 ```
