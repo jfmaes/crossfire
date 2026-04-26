@@ -610,8 +610,11 @@ export function createSessionService(input: SessionServiceInput) {
       const resolvedExistingSpec = mode === "existing_spec"
         ? await resolveExistingSpecInput({ prompt: rawPrompt, existingSpec: payload.existingSpec })
         : null;
+      if (mode === "existing_spec" && !resolvedExistingSpec) {
+        throw new Error("existingSpec.spec or existingSpec.specPath is required");
+      }
       const prompt = mode === "existing_spec"
-        ? resolvedExistingSpec.prompt
+        ? resolvedExistingSpec!.prompt
         : await buildPrompt(rawPrompt);
       const hasGrounding = mode === "new_spec" && prompt.length > rawPrompt.length;
       console.log(`\n━━━ New session: ${id.slice(0, 8)} ━━━`);
