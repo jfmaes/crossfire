@@ -7,21 +7,38 @@ function getPersona(role: "gpt" | "claude"): string {
 export function buildAnalysisPrompt(input: {
   role: "gpt" | "claude";
   originalProblem: string;
+  mode?: "new_spec" | "existing_spec";
 }): string {
+  const existingSpecMode = input.mode === "existing_spec";
+
   return [
     getPersona(input.role),
     "",
     ANTI_SYCOPHANCY,
     "",
-    `PHASE: INDEPENDENT ANALYSIS`,
+    existingSpecMode ? "PHASE: EXISTING SPEC REVIEW ANALYSIS" : "PHASE: INDEPENDENT ANALYSIS",
     `Your peer has NOT seen the problem yet — you are working in parallel.`,
-    `Produce a thorough, critical analysis. Identify at least 3 substantive risks or concerns before stating strengths.`,
+    existingSpecMode
+      ? "Produce a thorough, critical review. Identify substantive risks, contradictions, and missing decisions before noting strengths."
+      : "Produce a thorough, critical analysis. Identify at least 3 substantive risks or concerns before stating strengths.",
     "",
-    `Analyze the following problem and produce:`,
-    `1. A thorough breakdown of what this problem entails — be specific about what could go wrong`,
-    `2. Up to 5 critical questions the human MUST answer before design can begin (fewer is better — only ask what's truly necessary)`,
-    `3. For each question, explain it in plain human language, not builder jargon`,
-    `4. For each question, give your current best recommendation so the human can either decide for themselves or let Crossfire decide`,
+    ...(existingSpecMode
+      ? [
+          "Treat the submitted spec and implementation plan as the subject under review.",
+          "Ask questions only when the supplied documents do not contain enough information to make a sound recommendation.",
+          "Review the supplied documents and produce:",
+          "1. A thorough breakdown of the current specification and implementation plan — be specific about what is strong, weak, missing, or risky",
+          "2. Up to 5 critical questions the human MUST answer before revision can proceed confidently (fewer is better — only ask what's truly necessary)",
+          "3. For each question, explain it in plain human language, not builder jargon",
+          "4. For each question, give your current best recommendation so the human can either decide for themselves or let Crossfire decide"
+        ]
+      : [
+          "Analyze the following problem and produce:",
+          "1. A thorough breakdown of what this problem entails — be specific about what could go wrong",
+          "2. Up to 5 critical questions the human MUST answer before design can begin (fewer is better — only ask what's truly necessary)",
+          "3. For each question, explain it in plain human language, not builder jargon",
+          "4. For each question, give your current best recommendation so the human can either decide for themselves or let Crossfire decide"
+        ]),
     "",
     `Respond ONLY with a JSON object matching this schema:`,
     `{`,
@@ -193,7 +210,9 @@ export function buildSpecPrompt(input: {
   interviewResults: Array<{ question: string; answer: string }>;
   approachResult: string;
   peerDraft?: string;
+  mode?: "new_spec" | "existing_spec";
 }): string {
+  const existingSpecMode = input.mode === "existing_spec";
   const interviewContext = input.interviewResults
     .map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`)
     .join("\n\n");
@@ -203,10 +222,18 @@ export function buildSpecPrompt(input: {
     "",
     ANTI_SYCOPHANCY,
     "",
-    `PHASE: SPEC GENERATION`,
-    input.peerDraft
-      ? `Review and finalize the following drafts. Do NOT rubber-stamp them — find gaps, contradictions, and missing edge cases. Fix every issue you find. Produce TWO separate markdown documents.`
-      : `Based on the converged approach, produce TWO separate markdown documents:`,
+    existingSpecMode ? "PHASE: EXISTING SPEC REVISION" : "PHASE: SPEC GENERATION",
+    existingSpecMode
+      ? (
+        input.peerDraft
+          ? "Review and finalize the following revised drafts. Do NOT rubber-stamp them — find gaps, contradictions, and missing edge cases. Revise the supplied specification and implementation plan so both documents are internally consistent and ready to ship."
+          : "Revise the supplied specification and implementation plan based on the converged approach. Preserve valid material, fix gaps and contradictions, and return complete updated markdown for both documents."
+      )
+      : (
+        input.peerDraft
+          ? "Review and finalize the following drafts. Do NOT rubber-stamp them — find gaps, contradictions, and missing edge cases. Fix every issue you find. Produce TWO separate markdown documents."
+          : "Based on the converged approach, produce TWO separate markdown documents:"
+      ),
     "",
     `DOCUMENT 1 — SPECIFICATION:`,
     `- Goal: What we're building and why, with explicit non-goals`,

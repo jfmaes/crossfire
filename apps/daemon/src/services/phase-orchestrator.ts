@@ -386,10 +386,15 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
   });
 
   return {
-    async runDualAnalysis(sessionId: string, prompt: string, runId?: string): Promise<AnalysisResult> {
+    async runDualAnalysis(
+      sessionId: string,
+      prompt: string,
+      runId?: string,
+      mode?: "new_spec" | "existing_spec"
+    ): Promise<AnalysisResult> {
       emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis", message: "Phase 1: Dual Analysis (GPT + Claude in parallel)" });
-      const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt });
-      const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt });
+      const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt, mode });
+      const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt, mode });
       const analysisLedger = [
         makePromptLedgerEntry("originalProblem", prompt)
       ];
@@ -663,7 +668,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       prompt: string,
       interviewResults: Array<{ question: string; answer: string }>,
       finalApproachHandoff: string,
-      runId?: string
+      runId?: string,
+      mode?: "new_spec" | "existing_spec"
     ): Promise<SpecGenerationResult> {
       // Step 1: GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
       emitProgress({ sessionId, runId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews → both walkthrough → Claude revises)" });
@@ -682,7 +688,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         role: "gpt",
         originalProblem: prompt,
         interviewResults,
-        approachResult: finalApproachHandoff
+        approachResult: finalApproachHandoff,
+        mode
       });
       const draftLedger = [
         makePromptLedgerEntry("originalProblem", prompt),
@@ -726,7 +733,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         originalProblem: prompt,
         interviewResults,
         approachResult: finalApproachHandoff,
-        peerDraft
+        peerDraft,
+        mode
       });
       const reviewLedger = [
         makePromptLedgerEntry("originalProblem", prompt),
@@ -893,7 +901,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           originalProblem: prompt,
           interviewResults,
           approachResult: finalApproachHandoff,
-          peerDraft: revisionPeerDraft
+          peerDraft: revisionPeerDraft,
+          mode
         });
 
         const revisionResult = await collectTurnOutput(input.claude, {

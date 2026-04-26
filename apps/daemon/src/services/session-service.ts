@@ -200,6 +200,10 @@ export function createSessionService(input: SessionServiceInput) {
     return session.prompt ?? session.title;
   }
 
+  function getSessionMode(session: { executionPolicy?: ExecutionPolicy | null }) {
+    return session.executionPolicy?.mode ?? "new_spec";
+  }
+
   function buildInterviewState(sessionId: string) {
     const questions = input.repository.findInterviewQuestions(sessionId);
     const answered = questions.filter((q) => q.answer !== null);
@@ -512,9 +516,11 @@ export function createSessionService(input: SessionServiceInput) {
   }
 
   async function runSessionFromScratch(id: string, prompt: string, options?: { restarted?: boolean; runId?: string }) {
+    const session = input.repository.findById(id);
+    const mode = getSessionMode(session ?? {});
     let analysisResult;
     try {
-      analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt, options?.runId);
+      analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt, options?.runId, mode);
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
       throw error;
@@ -922,6 +928,8 @@ export function createSessionService(input: SessionServiceInput) {
     const id = session.id;
     const phase = session.phase;
     const originalPrompt = getOriginalPrompt(session);
+    const persistedSession = input.repository.findById(id);
+    const mode = getSessionMode(persistedSession ?? {});
 
     input.repository.updateStatus({ id, status: "debating" });
 
@@ -930,7 +938,7 @@ export function createSessionService(input: SessionServiceInput) {
         // Re-run the full analysis + question debate
         let analysisResult;
         try {
-          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt, runId);
+          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt, runId, mode);
         } catch (error) {
           input.repository.updateStatus({ id, status: "errored" });
           throw error;
@@ -1484,6 +1492,8 @@ export function createSessionService(input: SessionServiceInput) {
   async function advanceToSpecGeneration(id: string, originalPrompt: string, humanFeedback?: string, runId?: string) {
     input.repository.updatePhase({ id, phase: "spec_generation" });
     input.repository.updateStatus({ id, status: "debating" });
+    const session = input.repository.findById(id);
+    const mode = getSessionMode(session ?? {});
 
     const questions = input.repository.findInterviewQuestions(id);
     const interviewResults = questions
@@ -1504,7 +1514,7 @@ export function createSessionService(input: SessionServiceInput) {
     let specResult;
     try {
       specResult = await phaseOrchestrator.runSpecGeneration(
-        id, originalPrompt, interviewResults, finalApproachHandoff, runId
+        id, originalPrompt, interviewResults, finalApproachHandoff, runId, mode
       );
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
