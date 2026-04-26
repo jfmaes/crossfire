@@ -132,6 +132,55 @@ describe("session routes", () => {
     await app.close();
   });
 
+  it("passes existing spec creation payloads to the session service", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const service = {
+      ...fakeService,
+      async createSession(input: Record<string, unknown>) {
+        captured = input;
+        return fakeSession;
+      }
+    };
+    const app = buildServer({ accessToken: "secret-token", sessionService: service });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions",
+      headers: { "x-council-token": "secret-token" },
+      payload: {
+        title: "Review existing spec",
+        mode: "existing_spec",
+        prompt: "Check rollout risks",
+        existingSpec: { spec: "# Spec", implementationPlan: "# Plan" }
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(captured?.mode).toBe("existing_spec");
+    expect(captured?.existingSpec).toEqual({ spec: "# Spec", implementationPlan: "# Plan" });
+    await app.close();
+  });
+
+  it("returns 400 when existing spec creation omits spec input", async () => {
+    const app = buildServer({ accessToken: "secret-token", sessionService: fakeService });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions",
+      headers: { "x-council-token": "secret-token" },
+      payload: {
+        title: "Review existing spec",
+        mode: "existing_spec",
+        prompt: "Check rollout risks",
+        existingSpec: {}
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("existingSpec.spec or existingSpec.specPath is required");
+    await app.close();
+  });
+
   it("continues a session and returns updated checkpoint", async () => {
     const app = buildServer({
       accessToken: "secret-token",

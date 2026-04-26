@@ -3,11 +3,24 @@ import { SessionConflictError } from "../services/session-service";
 
 const MAX_APPROACH_DEBATE_TURNS = 30;
 
+type SessionMode = "new_spec" | "existing_spec";
+
+interface ExistingSpecInput {
+  spec?: string;
+  specPath?: string;
+  specFileName?: string;
+  implementationPlan?: string;
+  implementationPlanPath?: string;
+  implementationPlanFileName?: string;
+}
+
 interface SessionService {
   createSession(input: {
     title: string;
     prompt: string;
     executionPolicy?: { approachDebateMaxTurns?: number };
+    mode?: SessionMode;
+    existingSpec?: ExistingSpecInput;
   }): Promise<Record<string, unknown>>;
   continueSession(input: { id: string; humanResponse: string }): Promise<Record<string, unknown> | null>;
   restartSession(id: string): Promise<Record<string, unknown> | null>;
@@ -28,6 +41,53 @@ export async function registerSessionRoutes(
     return payload && "activeRun" in payload && payload.activeRun ? pendingCode : readyCode;
   }
 
+  function parseExistingSpec(body: Record<string, unknown> | null): ExistingSpecInput | undefined {
+    const existingSpec =
+      typeof body?.existingSpec === "object" && body.existingSpec
+        ? body.existingSpec as Record<string, unknown>
+        : undefined;
+
+    if (!existingSpec) {
+      return undefined;
+    }
+
+    return {
+      spec: typeof existingSpec.spec === "string" ? existingSpec.spec : undefined,
+      specPath: typeof existingSpec.specPath === "string" ? existingSpec.specPath : undefined,
+      specFileName: typeof existingSpec.specFileName === "string" ? existingSpec.specFileName : undefined,
+      implementationPlan: typeof existingSpec.implementationPlan === "string" ? existingSpec.implementationPlan : undefined,
+      implementationPlanPath: typeof existingSpec.implementationPlanPath === "string" ? existingSpec.implementationPlanPath : undefined,
+      implementationPlanFileName:
+        typeof existingSpec.implementationPlanFileName === "string"
+          ? existingSpec.implementationPlanFileName
+          : undefined
+    };
+  }
+
+  function hasRequiredExistingSpec(existingSpec?: ExistingSpecInput): boolean {
+    return Boolean(existingSpec?.spec?.trim() || existingSpec?.specPath?.trim());
+  }
+
+  function isExistingSpecInputError(error: unknown): error is Error {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+
+    return [
+      "existingSpec.spec or existingSpec.specPath is required",
+      "Provide either spec text or specPath, not both",
+      "Provide either implementationPlan text or implementationPlanPath, not both",
+      "Unsupported spec file extension",
+      "Unsupported implementationPlan file extension",
+      "spec path must be a file",
+      "implementationPlan path must be a file",
+      "Unable to read spec path",
+      "Unable to read implementationPlan path",
+      "spec exceeds",
+      "implementationPlan exceeds"
+    ].some((message) => error.message.includes(message));
+  }
+
   app.post("/sessions", async (request, reply) => {
     if (!input.sessionService) {
       return reply.code(503).send({ error: "session service unavailable" });
@@ -36,6 +96,8 @@ export async function registerSessionRoutes(
     const body = request.body as Record<string, unknown> | null;
     const title = typeof body?.title === "string" ? body.title.trim() : "";
     const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+    const mode: SessionMode = body?.mode === "existing_spec" ? "existing_spec" : "new_spec";
+    const existingSpec = parseExistingSpec(body);
     const requestedApproachDebateMaxTurns =
       typeof body?.executionPolicy === "object" && body.executionPolicy
         ? (body.executionPolicy as Record<string, unknown>).approachDebateMaxTurns
@@ -52,14 +114,29 @@ export async function registerSessionRoutes(
           ? {}
           : undefined;
 
-    if (!title || !prompt) {
+    if (mode === "new_spec" && (!title || !prompt)) {
       return reply.code(400).send({ error: "title and prompt are required" });
+    }
+    if (mode === "existing_spec" && !title) {
+      return reply.code(400).send({ error: "title is required" });
+    }
+    if (mode === "existing_spec" && !hasRequiredExistingSpec(existingSpec)) {
+      return reply.code(400).send({ error: "existingSpec.spec or existingSpec.specPath is required" });
     }
 
     try {
-      const created = await input.sessionService.createSession({ title, prompt, executionPolicy });
+      const created = await input.sessionService.createSession({
+        title,
+        prompt,
+        executionPolicy,
+        mode,
+        existingSpec
+      });
       return reply.code(responseCode(created, 202, 201)).send(created);
     } catch (error) {
+      if (mode === "existing_spec" && isExistingSpecInputError(error)) {
+        return reply.code(400).send({ error: error.message });
+      }
       request.log.error(error, "session creation failed");
       return reply.code(500).send({ error: "session creation failed" });
     }
