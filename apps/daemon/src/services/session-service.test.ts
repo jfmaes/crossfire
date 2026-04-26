@@ -349,6 +349,30 @@ describe("createSessionService", () => {
     expect(seenPrompt).toContain("# Grounded context");
   });
 
+  it("stores existing spec source metadata when creating from paths", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "crossfire-existing-spec-service-"));
+    const specPath = path.join(tempDir, "spec.md");
+    await writeFile(specPath, "# Existing Spec", "utf8");
+    const repository = new SessionRepository(createInMemoryDatabase());
+    const service = createSessionService({
+      repository,
+      gpt: new FakeProvider("gpt"),
+      claude: new FakeProvider("claude")
+    });
+
+    const created = await service.createSession({
+      title: "Review from path",
+      mode: "existing_spec",
+      existingSpec: { specPath }
+    });
+    await waitForSettledSession(service, created.session.id);
+
+    const session = repository.findById(created.session.id)!;
+    const inputPhase = JSON.parse(repository.findPhaseResult(created.session.id, "existing_spec_input")!.resultJson);
+    expect(session.executionPolicy?.mode).toBe("existing_spec");
+    expect(inputPhase.sources[0].path).toBe(specPath);
+  });
+
   it("restarts non-finalized sessions in place asynchronously from phase 0", async () => {
     const service = createSessionService({
       repository: new SessionRepository(createInMemoryDatabase()),

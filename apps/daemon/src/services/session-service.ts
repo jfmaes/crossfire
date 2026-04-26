@@ -12,11 +12,21 @@ import { collectGroundingContext } from "./grounding";
 import { writeSpecArtifact } from "./artifacts";
 import { createPhaseOrchestrator } from "./phase-orchestrator";
 import { onProgress } from "./progress";
+import { resolveExistingSpecInput } from "./existing-spec-input";
 
 interface CreateSessionInput {
   title: string;
-  prompt: string;
+  prompt?: string;
   executionPolicy?: ExecutionPolicy;
+  mode?: "new_spec" | "existing_spec";
+  existingSpec?: {
+    spec?: string;
+    specPath?: string;
+    specFileName?: string;
+    implementationPlan?: string;
+    implementationPlanPath?: string;
+    implementationPlanFileName?: string;
+  };
 }
 
 interface SessionServiceInput {
@@ -589,11 +599,18 @@ export function createSessionService(input: SessionServiceInput) {
   return {
     async createSession(payload: CreateSessionInput): Promise<SessionServicePayload> {
       const id = randomUUID();
-      const prompt = await buildPrompt(payload.prompt);
-      const hasGrounding = prompt.length > payload.prompt.length;
+      const rawPrompt = payload.prompt ?? "";
+      const mode = payload.mode ?? "new_spec";
+      const resolvedExistingSpec = mode === "existing_spec"
+        ? await resolveExistingSpecInput({ prompt: rawPrompt, existingSpec: payload.existingSpec })
+        : null;
+      const prompt = mode === "existing_spec"
+        ? resolvedExistingSpec.prompt
+        : await buildPrompt(rawPrompt);
+      const hasGrounding = mode === "new_spec" && prompt.length > rawPrompt.length;
       console.log(`\n━━━ New session: ${id.slice(0, 8)} ━━━`);
       console.log(`  Title: ${payload.title}`);
-      console.log(`  Prompt: ${payload.prompt.length} chars${hasGrounding ? ` (+${prompt.length - payload.prompt.length} chars grounding)` : ""}`);
+      console.log(`  Prompt: ${rawPrompt.length} chars${hasGrounding ? ` (+${prompt.length - rawPrompt.length} chars grounding)` : ""}`);
 
       input.repository.create({
         id,
@@ -601,19 +618,46 @@ export function createSessionService(input: SessionServiceInput) {
         status: "debating",
         phase: "analysis",
         prompt,
-        executionPolicy: payload.executionPolicy ?? null
+        executionPolicy: resolvedExistingSpec
+          ? {
+              ...(payload.executionPolicy ?? {}),
+              mode,
+              existingSpecSources: resolvedExistingSpec.sources
+            }
+          : payload.executionPolicy
+            ? { ...payload.executionPolicy, mode }
+            : payload.executionPolicy ?? null
       });
+      if (resolvedExistingSpec) {
+        input.repository.savePhaseResult({
+          sessionId: id,
+          phase: "existing_spec_input",
+          resultJson: JSON.stringify({
+            spec: resolvedExistingSpec.spec,
+            implementationPlan: resolvedExistingSpec.implementationPlan,
+            sources: resolvedExistingSpec.sources
+          })
+        });
+      }
       return enqueueRun({
         sessionId: id,
         kind: "create",
         phase: "analysis",
-        summary: {
-          currentUnderstanding: "Session created. Phase 1 is starting.",
-          recommendation: "Watch live progress while Crossfire runs the initial analysis and interview-question debate.",
-          changedSinceLastCheckpoint: ["Session created"],
-          openRisks: [],
-          decisionsNeeded: []
-        },
+        summary: mode === "existing_spec"
+          ? {
+              currentUnderstanding: "Existing spec review session created. Phase 1 is starting.",
+              recommendation: "Watch live progress while Crossfire reviews the supplied documents and aligns on any questions.",
+              changedSinceLastCheckpoint: ["Session created"],
+              openRisks: [],
+              decisionsNeeded: []
+            }
+          : {
+              currentUnderstanding: "Session created. Phase 1 is starting.",
+              recommendation: "Watch live progress while Crossfire runs the initial analysis and interview-question debate.",
+              changedSinceLastCheckpoint: ["Session created"],
+              openRisks: [],
+              decisionsNeeded: []
+            },
         task: async (runId) => {
           await runSessionFromScratch(id, prompt, { runId });
         }

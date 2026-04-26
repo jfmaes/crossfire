@@ -94,6 +94,27 @@ describe("session-service spec-driven lifecycle", () => {
     expect((settled as Record<string, unknown>).interviewState).toBeDefined();
   });
 
+  it("creates an existing-spec session and still surfaces interview questions", async () => {
+    const service = createService();
+
+    const created = await service.createSession({
+      title: "Review existing spec",
+      mode: "existing_spec",
+      prompt: "Focus on release risk.",
+      existingSpec: {
+        spec: "# Existing Spec\nShip a web dashboard.",
+        implementationPlan: "# Existing Plan\n1. Build UI."
+      }
+    });
+
+    const settled = await waitForSettledSession(service, created.session.id);
+
+    expect(settled.session.executionPolicy?.mode).toBe("existing_spec");
+    expect(settled.session.phase).toBe("interview");
+    expect(settled.interviewState?.currentQuestion?.text).toBe("What is the target platform?");
+    expect(settled.session.prompt).toContain("EXISTING SPECIFICATION");
+  });
+
   it("handles interview answers and advances to approach_debate", async () => {
     const service = createService();
 
