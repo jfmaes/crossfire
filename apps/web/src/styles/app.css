@@ -440,6 +440,43 @@ body {
   cursor: wait;
 }
 
+.mode-tabs,
+.source-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--bg-surface);
+}
+
+.mode-tabs button,
+.source-toggle button {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--ink-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mode-tabs button[aria-selected="true"],
+.source-toggle button[aria-pressed="true"] {
+  color: white;
+  background: var(--accent);
+}
+
+.existing-spec-form__section {
+  display: grid;
+  gap: 10px;
+}
+
+.existing-spec-form__error {
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
 /* ── Button loading state ── */
 
 .btn-loading {
