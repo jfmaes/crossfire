@@ -10,6 +10,8 @@ Crossfire orchestrates Claude and GPT through a structured multi-phase process t
 
 ## How it works
 
+Crossfire can either start from a new problem statement or review an existing spec / implementation plan.
+
 1. You describe what you want to build
 2. Both models independently analyze the problem, then debate which questions to ask you
 3. You answer their agreed interview questions one at a time (type `enough` to skip ahead)
@@ -57,6 +59,10 @@ pnpm start:verbose  # forward daemon + web stdout with prefixes
 ```
 
 Open http://localhost:5173 and describe a problem.
+
+## Reviewing existing specs
+
+Use the `Review Existing Spec` tab to upload `.md` / `.txt` files, paste text, or reference file paths readable by the daemon. Browser uploads are read in the web app and sent as text. File paths are read by the daemon process, so relative paths resolve from the directory where the daemon was started.
 
 If you want to run the processes separately for debugging, you still can:
 
