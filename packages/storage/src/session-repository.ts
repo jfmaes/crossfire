@@ -59,6 +59,19 @@ export interface SessionRunEventRow {
   createdAt: string;
 }
 
+export interface RevisionRequestRow {
+  id: string;
+  sessionId: string;
+  runId: string;
+  feedbackRaw: string;
+  feedbackChunks: Array<Record<string, unknown>>;
+  feedbackDigest: Record<string, unknown> | null;
+  budgetLedger: Record<string, unknown> | null;
+  status: string;
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
 interface SessionSummaryRow {
   sessionId: string;
   currentUnderstanding: string;
@@ -332,6 +345,7 @@ export class SessionRepository {
     this.db.prepare("DELETE FROM interview_questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM phase_results WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM session_run_events WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM revision_requests WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM session_runs WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM session_summaries WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
@@ -478,6 +492,96 @@ export class SessionRepository {
         WHERE id = ?
       `)
       .get(id) as SessionRunRow | undefined;
+  }
+
+  createRevisionRequest(row: RevisionRequestRow): void {
+    this.db
+      .prepare(`
+        INSERT INTO revision_requests (
+          id, session_id, run_id, feedback_raw, feedback_chunks_json,
+          feedback_digest_json, budget_ledger_json, status, created_at, updated_at
+        ) VALUES (
+          @id, @sessionId, @runId, @feedbackRaw, @feedbackChunksJson,
+          @feedbackDigestJson, @budgetLedgerJson, @status, @createdAt, @updatedAt
+        )
+      `)
+      .run({
+        ...row,
+        feedbackChunksJson: JSON.stringify(row.feedbackChunks),
+        feedbackDigestJson: row.feedbackDigest ? JSON.stringify(row.feedbackDigest) : null,
+        budgetLedgerJson: row.budgetLedger ? JSON.stringify(row.budgetLedger) : null,
+        updatedAt: row.updatedAt ?? null
+      });
+  }
+
+  updateRevisionRequest(input: {
+    id: string;
+    feedbackChunks?: Array<Record<string, unknown>>;
+    feedbackDigest?: Record<string, unknown> | null;
+    budgetLedger?: Record<string, unknown> | null;
+    status: string;
+    updatedAt: string;
+  }): void {
+    this.db
+      .prepare(`
+        UPDATE revision_requests
+        SET
+          feedback_chunks_json = CASE WHEN @hasFeedbackChunks THEN @feedbackChunksJson ELSE feedback_chunks_json END,
+          feedback_digest_json = CASE WHEN @hasFeedbackDigest THEN @feedbackDigestJson ELSE feedback_digest_json END,
+          budget_ledger_json = CASE WHEN @hasBudgetLedger THEN @budgetLedgerJson ELSE budget_ledger_json END,
+          status = @status,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `)
+      .run({
+        id: input.id,
+        hasFeedbackChunks: input.feedbackChunks !== undefined ? 1 : 0,
+        feedbackChunksJson: input.feedbackChunks ? JSON.stringify(input.feedbackChunks) : null,
+        hasFeedbackDigest: input.feedbackDigest !== undefined ? 1 : 0,
+        feedbackDigestJson: input.feedbackDigest ? JSON.stringify(input.feedbackDigest) : null,
+        hasBudgetLedger: input.budgetLedger !== undefined ? 1 : 0,
+        budgetLedgerJson: input.budgetLedger ? JSON.stringify(input.budgetLedger) : null,
+        status: input.status,
+        updatedAt: input.updatedAt
+      });
+  }
+
+  findRevisionRequestByRunId(runId: string): RevisionRequestRow | undefined {
+    const row = this.db
+      .prepare(`
+        SELECT
+          id,
+          session_id as sessionId,
+          run_id as runId,
+          feedback_raw as feedbackRaw,
+          feedback_chunks_json as feedbackChunksJson,
+          feedback_digest_json as feedbackDigestJson,
+          budget_ledger_json as budgetLedgerJson,
+          status,
+          created_at as createdAt,
+          updated_at as updatedAt
+        FROM revision_requests
+        WHERE run_id = ?
+      `)
+      .get(runId) as
+      | (Omit<RevisionRequestRow, "feedbackChunks" | "feedbackDigest" | "budgetLedger"> & {
+          feedbackChunksJson: string;
+          feedbackDigestJson?: string | null;
+          budgetLedgerJson?: string | null;
+        })
+      | undefined;
+
+    if (!row) {
+      return undefined;
+    }
+
+    const { feedbackChunksJson, feedbackDigestJson, budgetLedgerJson, ...revisionRequest } = row;
+    return {
+      ...revisionRequest,
+      feedbackChunks: JSON.parse(feedbackChunksJson),
+      feedbackDigest: feedbackDigestJson ? JSON.parse(feedbackDigestJson) : null,
+      budgetLedger: budgetLedgerJson ? JSON.parse(budgetLedgerJson) : null
+    };
   }
 
   findRunsBySession(sessionId: string, limit = 10): SessionRunRow[] {

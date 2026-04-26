@@ -1241,6 +1241,10 @@ export function createSessionService(input: SessionServiceInput) {
   async function reviseSpec(id: string, originalPrompt: string, feedback: string, runId?: string) {
     input.repository.updateStatus({ id, status: "debating" });
 
+    if (!runId) {
+      throw new Error("revision run id required");
+    }
+
     const questions = input.repository.findInterviewQuestions(id);
     const interviewResults = questions
       .filter((q) => q.answer !== null)
@@ -1252,23 +1256,86 @@ export function createSessionService(input: SessionServiceInput) {
       approachData?.finalApproachHandoff
       ?? approachData?.convergedApproach
       ?? "";
-    const revisedPrompt = [
-      originalPrompt,
-      "",
-      "---",
-      "",
-      "HUMAN REVISION FEEDBACK:",
-      feedback
-    ].join("\n");
+
+    const currentSpecRow = input.repository.findPhaseResult(id, "spec_generation");
+    const currentSpecData = currentSpecRow ? JSON.parse(currentSpecRow.resultJson) : null;
+    const currentSpec =
+      typeof currentSpecData?.spec === "string"
+        ? currentSpecData.spec
+        : typeof currentSpecData?.proposedSpecDelta === "string"
+          ? currentSpecData.proposedSpecDelta
+          : "";
+    const currentImplementationPlan =
+      typeof currentSpecData?.implementationPlan === "string"
+        ? currentSpecData.implementationPlan
+        : "";
+    if (!currentSpec || !currentImplementationPlan) {
+      throw new Error("Cannot revise spec without an existing spec and implementation plan");
+    }
+
+    const revisionRequestId = randomUUID();
+    input.repository.createRevisionRequest({
+      id: revisionRequestId,
+      sessionId: id,
+      runId,
+      feedbackRaw: feedback,
+      feedbackChunks: [],
+      feedbackDigest: null,
+      budgetLedger: null,
+      status: "stored",
+      createdAt: new Date().toISOString()
+    });
 
     let specResult;
     try {
-      specResult = await phaseOrchestrator.runSpecGeneration(
-        id, revisedPrompt, interviewResults, finalApproachHandoff, runId
+      specResult = await phaseOrchestrator.runSpecRevision(
+        id,
+        {
+          originalProblem: originalPrompt,
+          interviewResults,
+          finalApproachHandoff,
+          currentSpec,
+          currentImplementationPlan,
+          feedbackRaw: feedback
+        },
+        runId
       );
+      input.repository.updateRevisionRequest({
+        id: revisionRequestId,
+        feedbackChunks: specResult.revisionRequest.feedbackChunks,
+        feedbackDigest: specResult.revisionRequest.feedbackDigest,
+        budgetLedger: specResult.revisionRequest.budgetLedger,
+        status: specResult.blockedReason ? "blocked" : "applied",
+        updatedAt: new Date().toISOString()
+      });
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
+      input.repository.updateRevisionRequest({
+        id: revisionRequestId,
+        status: "failed",
+        updatedAt: new Date().toISOString()
+      });
       throw error;
+    }
+
+    if (specResult.blockedReason) {
+      input.repository.updateStatus({ id, status: "checkpoint" });
+      const previousSummary = input.repository.findSummaryBySessionId(id);
+      const summary = {
+        currentUnderstanding: specResult.summary,
+        recommendation: "Your feedback is too large to apply safely in one revision. Prioritize the most important changes and submit a smaller revision request.",
+        changedSinceLastCheckpoint: ["Revision blocked because feedback exceeded safe prompt budgets"],
+        openRisks: [specResult.blockedReason],
+        decisionsNeeded: ["Prioritize the feedback into a smaller revision request"]
+      };
+      input.repository.saveSummary({ sessionId: id, ...summary, artifactPath: previousSummary?.artifactPath ?? null });
+
+      return {
+        session: input.repository.findById(id)!,
+        summary,
+        phaseResult: currentSpecData,
+        interviewState: buildInterviewState(id)
+      };
     }
 
     input.repository.savePhaseResult({

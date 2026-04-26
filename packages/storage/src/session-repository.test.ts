@@ -116,4 +116,220 @@ describe("SessionRepository", () => {
     expect(reopenedRepo.findSummaryBySessionId("sess_1")?.recommendation).toBe("Use SQLite on disk");
     reopenedDb.close();
   });
+
+  it("stores spec revision feedback verbatim by run id", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Revision session",
+      status: "checkpoint",
+      phase: "spec_generation"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "revise",
+      status: "running",
+      phase: "spec_generation",
+      startedAt: "2026-04-25T10:00:00.000Z"
+    });
+
+    const feedbackRaw = "Line one\n\nLine two with exact wording.";
+    repo.createRevisionRequest({
+      id: "rev_1",
+      sessionId: "sess_1",
+      runId: "run_1",
+      feedbackRaw,
+      feedbackChunks: [],
+      feedbackDigest: null,
+      budgetLedger: null,
+      status: "stored",
+      createdAt: "2026-04-25T10:00:01.000Z"
+    });
+
+    const found = repo.findRevisionRequestByRunId("run_1");
+    expect(found?.feedbackRaw).toBe(feedbackRaw);
+    expect(found?.status).toBe("stored");
+  });
+
+  it("rejects duplicate revision requests for the same run", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Revision session",
+      status: "checkpoint",
+      phase: "spec_generation"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "revise",
+      status: "running",
+      phase: "spec_generation",
+      startedAt: "2026-04-25T10:00:00.000Z"
+    });
+
+    repo.createRevisionRequest({
+      id: "rev_1",
+      sessionId: "sess_1",
+      runId: "run_1",
+      feedbackRaw: "First request",
+      feedbackChunks: [],
+      feedbackDigest: null,
+      budgetLedger: null,
+      status: "stored",
+      createdAt: "2026-04-25T10:00:01.000Z"
+    });
+
+    expect(() =>
+      repo.createRevisionRequest({
+        id: "rev_2",
+        sessionId: "sess_1",
+        runId: "run_1",
+        feedbackRaw: "Second request",
+        feedbackChunks: [],
+        feedbackDigest: null,
+        budgetLedger: null,
+        status: "stored",
+        createdAt: "2026-04-25T10:00:02.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("preserves revision request JSON fields when omitted from updates", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Revision session",
+      status: "checkpoint",
+      phase: "spec_generation"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "revise",
+      status: "running",
+      phase: "spec_generation",
+      startedAt: "2026-04-25T10:00:00.000Z"
+    });
+
+    const feedbackRaw = "Line one\n\nLine two with exact wording.";
+    const feedbackChunks = [{ text: "Line one", source: "user" }];
+    const feedbackDigest = { summary: "Keep exact wording" };
+    const budgetLedger = { inputTokens: 123, outputTokens: 45 };
+    repo.createRevisionRequest({
+      id: "rev_1",
+      sessionId: "sess_1",
+      runId: "run_1",
+      feedbackRaw,
+      feedbackChunks,
+      feedbackDigest,
+      budgetLedger,
+      status: "stored",
+      createdAt: "2026-04-25T10:00:01.000Z"
+    });
+
+    repo.updateRevisionRequest({
+      id: "rev_1",
+      status: "processed",
+      updatedAt: "2026-04-25T10:00:02.000Z"
+    });
+
+    const found = repo.findRevisionRequestByRunId("run_1");
+    expect(found?.feedbackRaw).toBe(feedbackRaw);
+    expect(found?.feedbackChunks).toEqual(feedbackChunks);
+    expect(found?.feedbackDigest).toEqual(feedbackDigest);
+    expect(found?.budgetLedger).toEqual(budgetLedger);
+    expect(found?.status).toBe("processed");
+    expect(found?.updatedAt).toBe("2026-04-25T10:00:02.000Z");
+  });
+
+  it("deleteSession removes revision requests for the session", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Revision session",
+      status: "checkpoint",
+      phase: "spec_generation"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "revise",
+      status: "running",
+      phase: "spec_generation",
+      startedAt: "2026-04-25T10:00:00.000Z"
+    });
+    repo.createRevisionRequest({
+      id: "rev_1",
+      sessionId: "sess_1",
+      runId: "run_1",
+      feedbackRaw: "Revision request",
+      feedbackChunks: [],
+      feedbackDigest: null,
+      budgetLedger: null,
+      status: "stored",
+      createdAt: "2026-04-25T10:00:01.000Z"
+    });
+
+    repo.deleteSession("sess_1");
+
+    expect(repo.findRevisionRequestByRunId("run_1")).toBeUndefined();
+  });
+
+  it("clears revision request digest and budget ledger when updated to null", () => {
+    const db = createInMemoryDatabase();
+    const repo = new SessionRepository(db);
+
+    repo.create({
+      id: "sess_1",
+      title: "Revision session",
+      status: "checkpoint",
+      phase: "spec_generation"
+    });
+    repo.createRun({
+      id: "run_1",
+      sessionId: "sess_1",
+      kind: "revise",
+      status: "running",
+      phase: "spec_generation",
+      startedAt: "2026-04-25T10:00:00.000Z"
+    });
+
+    const feedbackChunks = [{ text: "Line one", source: "user" }];
+    repo.createRevisionRequest({
+      id: "rev_1",
+      sessionId: "sess_1",
+      runId: "run_1",
+      feedbackRaw: "Line one",
+      feedbackChunks,
+      feedbackDigest: { summary: "Keep exact wording" },
+      budgetLedger: { inputTokens: 123, outputTokens: 45 },
+      status: "stored",
+      createdAt: "2026-04-25T10:00:01.000Z"
+    });
+
+    repo.updateRevisionRequest({
+      id: "rev_1",
+      feedbackDigest: null,
+      budgetLedger: null,
+      status: "processed",
+      updatedAt: "2026-04-25T10:00:02.000Z"
+    });
+
+    const found = repo.findRevisionRequestByRunId("run_1");
+    expect(found?.feedbackChunks).toEqual(feedbackChunks);
+    expect(found?.feedbackDigest).toBeNull();
+    expect(found?.budgetLedger).toBeNull();
+    expect(found?.status).toBe("processed");
+    expect(found?.updatedAt).toBe("2026-04-25T10:00:02.000Z");
+  });
 });

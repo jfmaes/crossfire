@@ -94,9 +94,36 @@ describe("DebateCard", () => {
 
     expect(screen.getByText("Clarification needed")).toBeTruthy();
     expect(screen.getByText("The debate paused for your input")).toBeTruthy();
-    expect(screen.getByText("Which deployment environment is authoritative?")).toBeTruthy();
+    expect(screen.getAllByText("Which deployment environment is authoritative?").length).toBeGreaterThanOrEqual(2);
     const button = screen.getByRole("button", { name: "Submit clarification & continue debate" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
+  });
+
+  it("repeats clarification questions in the final action panel after long debate output", () => {
+    render(
+      <DebateCard
+        title="Approach Debate"
+        badge="Phase 3"
+        summary="Summary"
+        canSubmitFeedback={true}
+        onSubmitFeedback={() => {}}
+        questionsForHuman={["Which deployment environment is authoritative?"]}
+        convergedApproach="Use staged deployments with manual promotion gates."
+        trace={{
+          stopReason: "questions_for_human",
+          turnsUsed: 3,
+          maxTurns: 6
+        }}
+      />
+    );
+
+    const textarea = screen.getByPlaceholderText("Provide the clarification the models asked for...");
+    const convergedApproachHeading = screen.getByText("Converged approach");
+
+    expect(
+      convergedApproachHeading.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(screen.getAllByText("Which deployment environment is authoritative?").length).toBeGreaterThanOrEqual(2);
   });
 
   it("shows unresolved max-turn state with decision-specific submit copy", () => {
@@ -119,8 +146,8 @@ describe("DebateCard", () => {
 
     expect(screen.getByText("Needs human judgment")).toBeTruthy();
     expect(screen.getByText("Remaining disagreements")).toBeTruthy();
-    expect(screen.getByText("Cache invalidation risk")).toBeTruthy();
-    expect(screen.getByText("Missing auth rollback")).toBeTruthy();
+    expect(screen.getAllByText("Cache invalidation risk").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Missing auth rollback").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByRole("button", { name: "Submit decision & continue" })).toBeTruthy();
   });
 });

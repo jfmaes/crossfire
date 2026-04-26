@@ -251,6 +251,14 @@ export function App() {
     (phase === "approach_debate" || phase === "spec_generation");
 
   const isFinalized = session?.session.status === "finalized";
+  const canSubmitApproachFeedback =
+    !!session &&
+    !session.activeRun &&
+    phase === "approach_debate" &&
+    (session.session.status === "checkpoint" || session.session.status === "waiting_for_human") &&
+    typeof session.phaseResult === "object" &&
+    session.phaseResult !== null &&
+    "convergedApproach" in session.phaseResult;
   const showCheckpointCard =
     !!session &&
     !session.activeRun &&
@@ -264,7 +272,7 @@ export function App() {
       && actionRef.current
       && typeof actionRef.current.scrollIntoView === "function"
     ) {
-      actionRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      actionRef.current.scrollIntoView({ behavior: "auto", block: "center" });
     }
   }, [showCheckpointCard]);
 
@@ -582,6 +590,7 @@ export function App() {
               } | undefined}
               canSubmitFeedback={isCheckpoint}
               feedbackLoading={debateFeedbackLoading}
+              submitRef={isCheckpoint ? actionRef : undefined}
               onSubmitFeedback={isCheckpoint ? async (feedback: string) => {
                 setDebateFeedbackLoading(true);
                 try {
@@ -745,7 +754,7 @@ export function App() {
       )}
 
       {showCheckpointCard && (
-        <div ref={actionRef}>
+        <div ref={canSubmitApproachFeedback ? undefined : actionRef}>
           <CheckpointCard
             summary={session.summary}
             phase={phase}

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAnalysisPrompt,
+  buildFeedbackDigestPrompt,
   buildQuestionDebatePrompt,
+  buildSpecRevisionPrompt,
   buildSpecPrompt,
   buildWalkthroughPrompt
 } from "./phase-prompts";
@@ -57,9 +59,78 @@ describe("buildStructuredTurnPrompt", () => {
     expect(prompt).toContain('"milestoneReached": null');
     expect(prompt).toContain("No markdown fences.");
   });
+
+  it("requires human blocker questions to carry a recommended default when possible", () => {
+    const prompt = buildStructuredTurnPrompt({
+      role: "claude",
+      originalProblem: "Design a retrieval system",
+      peerResponse: "We cannot choose the fallback without human input.",
+      turnNumber: 4,
+      totalTurns: 6
+    });
+
+    expect(prompt).toContain(
+      "questionsForHuman: ONLY if the discussion genuinely cannot proceed without human clarification."
+    );
+    expect(prompt).toContain(
+      "When you ask the human, include Crossfire's best current default recommendation inside the question whenever possible."
+    );
+  });
 });
 
 describe("phase prompt contracts", () => {
+  it("builds a feedback digest prompt with verbatim chunks", () => {
+    const prompt = buildFeedbackDigestPrompt({
+      originalProblem: "Build retrieval",
+      feedbackChunks: [
+        { id: "feedback-chunk-1", startOffset: 0, endOffset: 12, text: "Make it safer" }
+      ]
+    });
+
+    expect(prompt).toContain("PHASE: FEEDBACK DIGEST");
+    expect(prompt).toContain("feedback-chunk-1");
+    expect(prompt).toContain("[0-12]");
+    expect(prompt).toContain("Make it safer");
+    expect(prompt).toContain("sourceChunkIds");
+    expect(prompt).toContain("raw feedback chunks are authoritative");
+    expect(prompt).toContain("\"rawText\"");
+    expect(prompt).toContain("\"summary\"");
+    expect(prompt).toContain("\"proposedSpecDelta\"");
+  });
+
+  it("builds a spec revision prompt from existing spec and exact excerpts", () => {
+    const prompt = buildSpecRevisionPrompt({
+      originalProblem: "Build retrieval",
+      interviewResults: [{ question: "Cloud?", answer: "Allowed" }],
+      approachResult: "Use hybrid retrieval",
+      currentSpec: "# Current Spec",
+      currentImplementationPlan: "# Current Plan",
+      feedbackDigest: "- request: update auth",
+      feedbackExcerpts: "### feedback-chunk-1\nAdd bearer auth."
+    });
+
+    expect(prompt).toContain("PHASE: SPEC REVISION");
+    expect(prompt).toContain("Build retrieval");
+    expect(prompt).toContain("Cloud?");
+    expect(prompt).toContain("Allowed");
+    expect(prompt).toContain("Use hybrid retrieval");
+    expect(prompt).toContain("CURRENT SPECIFICATION:");
+    expect(prompt).toContain("# Current Spec");
+    expect(prompt).toContain("CURRENT IMPLEMENTATION PLAN:");
+    expect(prompt).toContain("# Current Plan");
+    expect(prompt).toContain("FEEDBACK DIGEST:");
+    expect(prompt).toContain("- request: update auth");
+    expect(prompt).toContain("EXACT FEEDBACK EXCERPTS");
+    expect(prompt).toContain("Add bearer auth.");
+    expect(prompt).toContain("Do not restart the architecture from scratch");
+    expect(prompt).toContain("excerpt wins");
+    expect(prompt).toContain("\"rawText\"");
+    expect(prompt).toContain("\"summary\"");
+    expect(prompt).toContain("\"proposedSpecDelta\"");
+    expect(prompt).toContain("\"milestoneReached\"");
+    expect(prompt).toContain("\"implementationPlan\"");
+  });
+
   it("keeps the question-debate contract narrow and reserves questionsForHuman for clarification blockers", () => {
     const prompt = buildQuestionDebatePrompt({
       role: "gpt",

@@ -51,6 +51,42 @@ function createDelayedQuestionProvider(name: "gpt" | "claude", delayMs = 25): Pr
   };
 }
 
+function seedSpecCheckpoint(repository: SessionRepository) {
+  repository.create({
+    id: "sess_spec",
+    title: "Spec revision session",
+    status: "checkpoint",
+    phase: "spec_generation",
+    prompt: "Build an app"
+  });
+  repository.saveSummary({
+    sessionId: "sess_spec",
+    currentUnderstanding: "Spec ready for review.",
+    recommendation: "Approve or revise the specification.",
+    changedSinceLastCheckpoint: ["Spec generated"],
+    openRisks: [],
+    decisionsNeeded: ["Approve or revise"],
+    artifactPath: null
+  });
+  repository.savePhaseResult({
+    sessionId: "sess_spec",
+    phase: "approach_debate",
+    resultJson: JSON.stringify({
+      convergedApproach: "Use a simple web architecture.",
+      finalApproachHandoff: "Use React and Node."
+    })
+  });
+  repository.savePhaseResult({
+    sessionId: "sess_spec",
+    phase: "spec_generation",
+    resultJson: JSON.stringify({
+      spec: "# Current Spec",
+      implementationPlan: "# Current Plan",
+      summary: "Current spec summary"
+    })
+  });
+}
+
 describe("createSessionService", () => {
   async function waitForSettledSession(
     service: ReturnType<typeof createSessionService>,
@@ -133,6 +169,121 @@ describe("createSessionService", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  it("stores large spec feedback verbatim and revises from the existing spec", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    seedSpecCheckpoint(repository);
+    const prompts: ProviderTurnInput[] = [];
+    const provider: ProviderAdapter = {
+      name: "gpt",
+      async *sendTurn(input: ProviderTurnInput) {
+        prompts.push(input);
+        const turn: ModelTurn = {
+          actor: "gpt",
+          rawText: "ok",
+          summary: "ok",
+          newInsights: [],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: input.phase === "feedback_digest"
+            ? "- change: tighten auth\n  sourceChunkIds: [feedback-chunk-1]"
+            : "# Revised Spec",
+          milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+          implementationPlan: input.phase === "spec_generation" ? "# Revised Plan" : null,
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: input.phase === "walkthrough" ? [] : null,
+          degraded: false
+        };
+        yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+        yield { type: "done" } as const;
+      },
+      async healthCheck() {
+        return { ok: true, detail: "ready" };
+      }
+    };
+    const service = createSessionService({
+      repository,
+      gpt: provider,
+      claude: provider
+    });
+
+    const feedback = "Please tighten auth. ".repeat(1_000);
+    const started = await service.continueSession({ id: "sess_spec", humanResponse: feedback });
+    expect(started?.activeRun).toBeDefined();
+    const runId = started!.activeRun!.id;
+
+    const settled = await waitForSettledSession(service, "sess_spec");
+    const revisionRequest = repository.findRevisionRequestByRunId(runId);
+    const specResult = JSON.parse(repository.findPhaseResult("sess_spec", "spec_generation")!.resultJson);
+
+    expect(settled.session.status).toBe("checkpoint");
+    expect(revisionRequest?.feedbackRaw).toBe(feedback);
+    expect(revisionRequest?.status).toBe("applied");
+    expect(specResult.spec).toBe("# Revised Spec");
+    expect(specResult.implementationPlan).toBe("# Revised Plan");
+    expect(prompts.some((prompt) => prompt.prompt.includes("HUMAN REVISION FEEDBACK:"))).toBe(false);
+    expect(prompts.some((prompt) => prompt.prompt.includes("CURRENT SPECIFICATION:"))).toBe(true);
+  });
+
+  it("keeps previous spec result when spec revision provider fails", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    seedSpecCheckpoint(repository);
+    const provider: ProviderAdapter = {
+      name: "gpt",
+      async *sendTurn(input: ProviderTurnInput) {
+        const turn: Partial<ModelTurn> = {
+          actor: "gpt",
+          rawText: "invalid revision",
+          summary: "invalid revision",
+          newInsights: [],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: input.phase === "feedback_digest"
+            ? "- change: tighten auth\n  sourceChunkIds: [feedback-chunk-1]"
+            : "# Broken Spec",
+          milestoneReached: input.phase === "spec_generation" ? "implementation_plan_ready" : null,
+          implementationPlan: input.phase === "feedback_digest" ? null : undefined,
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: null,
+          degraded: false
+        };
+        yield { type: "structured_turn", actor: "gpt", turn: turn as ModelTurn, rawResponse: JSON.stringify(turn) } as const;
+        yield { type: "done" } as const;
+      },
+      async healthCheck() {
+        return { ok: true, detail: "ready" };
+      }
+    };
+    const service = createSessionService({
+      repository,
+      gpt: provider,
+      claude: provider
+    });
+
+    const started = await service.continueSession({
+      id: "sess_spec",
+      humanResponse: "Please tighten auth. ".repeat(1_000)
+    });
+    const runId = started!.activeRun!.id;
+    const settled = await waitForSettledSession(service, "sess_spec");
+    const specResult = JSON.parse(repository.findPhaseResult("sess_spec", "spec_generation")!.resultJson);
+    const revisionRequest = repository.findRevisionRequestByRunId(runId);
+
+    expect(settled.session.status).toBe("errored");
+    expect(specResult.spec).toBe("# Current Spec");
+    expect(specResult.implementationPlan).toBe("# Current Plan");
+    expect(revisionRequest?.status).toBe("failed");
   });
 
   it("injects grounding context into the first prompt when configured", async () => {

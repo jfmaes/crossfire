@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import type { DebateTrace } from "../lib/api";
 import { MarkdownContent } from "./markdown-content";
 
@@ -26,6 +26,7 @@ interface DebateCardProps {
   onSubmitFeedback?: (feedback: string) => void;
   feedbackLoading?: boolean;
   trace?: DebateTrace;
+  submitRef?: Ref<HTMLDivElement>;
 }
 
 function formatStopReason(reason?: string | null): string | null {
@@ -143,7 +144,8 @@ export function DebateCard({
   canSubmitFeedback,
   onSubmitFeedback,
   feedbackLoading,
-  trace
+  trace,
+  submitRef
 }: DebateCardProps) {
   const challenges = convergedApproach ? parseChallenges(convergedApproach) : [];
   const [challengeFeedback, setChallengeFeedback] = useState<Record<number, string>>({});
@@ -201,6 +203,56 @@ export function DebateCard({
     if (clarificationNeeded) return "Provide the clarification the models asked for...";
     if (unresolvedAtTurnCap) return "State your judgment or direction for how Crossfire should proceed...";
     return "General feedback on the approach (optional)...";
+  }
+
+  function renderFeedbackSubmit() {
+    if (!canSubmitFeedback || !onSubmitFeedback) {
+      return null;
+    }
+
+    const requiredItems = clarificationNeeded ? clarificationQuestions
+      : unresolvedAtTurnCap ? finalDisagreements
+      : [];
+    const requiredTitle = clarificationNeeded ? "Clarifications to answer" : "Open disagreements to resolve";
+
+    return (
+      <div className="challenge-feedback-submit" ref={submitRef}>
+        {requiresExplicitDecision && requiredItems.length > 0 && (
+          <div className="challenge-feedback-submit__context">
+            <h3>{requiredTitle}</h3>
+            <ol className="challenge-feedback-submit__list">
+              {requiredItems.map((item, index) => (
+                <li key={`${index}-${item}`}>{item}</li>
+              ))}
+            </ol>
+          </div>
+        )}
+        <textarea
+          className="challenge-card__feedback-input challenge-card__feedback-input--general"
+          placeholder={feedbackPlaceholder()}
+          value={generalFeedback}
+          onChange={(event) => setGeneralFeedback(event.target.value)}
+          rows={3}
+        />
+        {requiresExplicitDecision && !hasAnyFeedback && (
+          <p className="question-source">Human input is required before Crossfire can continue from this checkpoint.</p>
+        )}
+        <button
+          className="challenge-feedback-submit__btn"
+          onClick={handleSubmit}
+          disabled={feedbackLoading || (requiresExplicitDecision && !hasAnyFeedback)}
+        >
+          {feedbackLoading ? (
+            <span className="btn-loading">
+              <span className="spinner" />
+              {loadingLabel()}
+            </span>
+          ) : (
+            submitLabel()
+          )}
+        </button>
+      </div>
+    );
   }
 
   let preText = "";
@@ -409,34 +461,7 @@ export function DebateCard({
         </div>
       )}
 
-      {canSubmitFeedback && onSubmitFeedback && (
-        <div className="challenge-feedback-submit">
-          <textarea
-            className="challenge-card__feedback-input challenge-card__feedback-input--general"
-            placeholder={feedbackPlaceholder()}
-            value={generalFeedback}
-            onChange={(event) => setGeneralFeedback(event.target.value)}
-            rows={3}
-          />
-          {requiresExplicitDecision && !hasAnyFeedback && (
-            <p className="question-source">Human input is required before Crossfire can continue from this checkpoint.</p>
-          )}
-          <button
-            className="challenge-feedback-submit__btn"
-            onClick={handleSubmit}
-            disabled={feedbackLoading || (requiresExplicitDecision && !hasAnyFeedback)}
-          >
-            {feedbackLoading ? (
-              <span className="btn-loading">
-                <span className="spinner" />
-                {loadingLabel()}
-              </span>
-            ) : (
-              submitLabel()
-            )}
-          </button>
-        </div>
-      )}
+      {renderFeedbackSubmit()}
     </article>
   );
 }

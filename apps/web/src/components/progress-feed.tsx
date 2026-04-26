@@ -49,6 +49,10 @@ function formatElapsed(ms: number): string {
 function describeActivity(input: { model?: string; phase?: string; turnNumber?: number }): string {
   if (!input.model) return "Working";
 
+  if (input.phase === "feedback_digest") {
+    return "Extracting feedback changes";
+  }
+
   if (input.phase === "spec_generation") {
     return input.model === "gpt" ? "Drafting specification" : "Reviewing and refining spec";
   }
@@ -101,6 +105,8 @@ function formatStopReason(reason?: string | null): string | null {
       return "blocked: spec input too large";
     case "revision_input_too_large":
       return "blocked: revision input too large";
+    case "feedback_input_too_large":
+      return "blocked: feedback too large";
     default:
       return reason ? `outcome: ${reason.replaceAll("_", " ")}` : null;
   }

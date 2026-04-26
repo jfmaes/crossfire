@@ -78,4 +78,39 @@ describe("ProgressFeed", () => {
     expect(screen.getByText("canonical handoff")).toBeTruthy();
     expect(screen.getByText("authority path uncompressed")).toBeTruthy();
   });
+
+  it("labels feedback digest and oversized feedback events", async () => {
+    getRunEventsMock.mockResolvedValue([
+      {
+        id: "evt_1",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "model_start",
+        model: "gpt",
+        phase: "feedback_digest",
+        message: "Extracting requested changes from large feedback",
+        metadata: null,
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: "evt_2",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "info",
+        phase: "spec_generation",
+        message: "feedback input too large",
+        metadata: { blockedReason: "feedback_input_too_large" },
+        createdAt: new Date().toISOString()
+      }
+    ]);
+
+    render(<ProgressFeed sessionId="sess_1" runId="run_1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Extracting feedback changes")).toBeTruthy();
+    });
+
+    expect(screen.getByText("Extracting requested changes from large feedback")).toBeTruthy();
+    expect(screen.getByText("blocked: feedback too large")).toBeTruthy();
+  });
 });

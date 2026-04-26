@@ -36,6 +36,7 @@ export type StopReason =
   | "max_turns"
   | "phase_invalid_turn"
   | "spec_generation_input_too_large"
+  | "feedback_input_too_large"
   | "revision_input_too_large"
   | string;
 

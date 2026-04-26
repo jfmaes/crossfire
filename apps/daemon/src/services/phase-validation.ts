@@ -2,8 +2,10 @@ type PhaseValidationPhase =
   | "analysis"
   | "analysis_debate"
   | "approach_debate"
+  | "feedback_digest"
   | "spec_generation"
-  | "walkthrough";
+  | "walkthrough"
+  | "gap_synthesis";
 
 type RequiredPhaseField =
   | "rawText"
@@ -21,8 +23,10 @@ const REQUIRED_FIELDS_BY_PHASE: Record<PhaseValidationPhase, readonly RequiredPh
   analysis: ["rawText", "summary", "proposedQuestions", "questionsForHuman"],
   analysis_debate: ["rawText", "summary", "disagreements", "questionsForHuman", "synthesizedQuestions"],
   approach_debate: ["rawText", "summary", "disagreements", "questionsForHuman", "proposedSpecDelta", "milestoneReached"],
+  feedback_digest: ["rawText", "summary", "proposedSpecDelta"],
   spec_generation: ["rawText", "summary", "proposedSpecDelta", "implementationPlan", "milestoneReached"],
-  walkthrough: ["rawText", "summary", "walkthroughGaps"]
+  walkthrough: ["rawText", "summary", "walkthroughGaps"],
+  gap_synthesis: ["rawText", "summary"]
 };
 
 export interface PhaseValidationResult {

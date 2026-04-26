@@ -1307,6 +1307,34 @@ body {
   gap: 12px;
 }
 
+.challenge-feedback-submit__context {
+  padding: 12px 14px;
+  border-radius: var(--radius-input);
+  border: 1px solid rgba(248, 113, 113, 0.16);
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.challenge-feedback-submit__context h3 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.challenge-feedback-submit__list {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--ink-secondary);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.challenge-feedback-submit__list li + li {
+  margin-top: 6px;
+}
+
 .challenge-feedback-submit__btn {
   width: fit-content;
   border: none;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ModelTurn } from "@council/core";
 import type { ProviderAdapter, ProviderTurnInput } from "@council/adapters";
 import { createPhaseOrchestrator } from "./phase-orchestrator";
+import { onProgress, type ProgressEvent } from "./progress";
 
 function createAnalysisProvider(name: "gpt" | "claude"): ProviderAdapter {
   return {
@@ -96,6 +97,32 @@ function createTurnSequenceProvider(
     async *sendTurn() {
       const turn = turns[Math.min(index, turns.length - 1)];
       index += 1;
+      yield {
+        type: "structured_turn",
+        actor: name,
+        turn,
+        rawResponse: JSON.stringify(turn)
+      } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+}
+
+function createCapturingProvider(
+  name: "gpt" | "claude",
+  turnForInput: (input: ProviderTurnInput) => ModelTurn
+): ProviderAdapter & { calls: ProviderTurnInput[] } {
+  const calls: ProviderTurnInput[] = [];
+
+  return {
+    name,
+    calls,
+    async *sendTurn(input: ProviderTurnInput) {
+      calls.push(input);
+      const turn = turnForInput(input);
       yield {
         type: "structured_turn",
         actor: name,
@@ -622,9 +649,482 @@ describe("createPhaseOrchestrator", () => {
           "s1",
           "Design a task manager",
           [{ question: "Scope?", answer: "Web only" }],
-          "X".repeat(20_001)
+          "X".repeat(100_001)
         )
       ).rejects.toThrow("spec_generation_input_too_large");
+    });
+
+    it("synthesizes walkthrough gaps when only the raw revision input exceeds budget", async () => {
+      const reviewedSpec = `# Reviewed Spec\n\n${"Detailed requirement.\n".repeat(9_000)}`;
+      const reviewedPlan = `# Reviewed Plan\n\n${"Implementation step.\n".repeat(300)}`;
+      const largeGaps = Array.from({ length: 35 }, (_, index) => ({
+        location: `Section ${index + 1}`,
+        issue: `Gap ${index + 1}: ${"missing operational detail ".repeat(90)}`,
+        fix: `Add precise behavior for gap ${index + 1}. ${"Include acceptance criteria. ".repeat(80)}`
+      }));
+
+      const claudePrompts: Array<{ phase?: string; prompt: string }> = [];
+      const synthesizedBrief = [
+        "## Synthesized Walkthrough Repair Brief",
+        "",
+        "- RC-1 covers gaps 1-35: add a consolidated operational contract."
+      ].join("\n");
+
+      const gpt: ProviderAdapter = {
+        name: "gpt",
+        async *sendTurn(input: ProviderTurnInput) {
+          const isWalkthrough = input.phase === "walkthrough";
+          const turn: ModelTurn = {
+            actor: "gpt",
+            rawText: isWalkthrough ? "GPT found many gaps" : "GPT draft",
+            summary: isWalkthrough ? "GPT walkthrough" : "GPT draft summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: isWalkthrough ? "" : "Small draft spec",
+            milestoneReached: isWalkthrough ? null : "implementation_plan_ready",
+            implementationPlan: isWalkthrough ? null : "Small draft plan",
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: isWalkthrough ? largeGaps : null,
+            degraded: false
+          };
+          yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const claude: ProviderAdapter = {
+        name: "claude",
+        async *sendTurn(input: ProviderTurnInput) {
+          claudePrompts.push({ phase: input.phase, prompt: input.prompt });
+          const turn: ModelTurn = {
+            actor: "claude",
+            rawText: "Claude output",
+            summary: "Claude summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: "",
+            milestoneReached: "implementation_plan_ready",
+            implementationPlan: null,
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: null,
+            degraded: false
+          };
+
+          if (input.phase === "walkthrough") {
+            const walkthroughTurn = {
+              ...turn,
+              rawText: "Claude found no additional gaps",
+              summary: "Claude walkthrough",
+              milestoneReached: null,
+              walkthroughGaps: []
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: walkthroughTurn,
+              rawResponse: JSON.stringify(walkthroughTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          if (input.phase === "gap_synthesis") {
+            const synthesisTurn = {
+              ...turn,
+              rawText: synthesizedBrief,
+              summary: "Synthesized 35 raw gaps into one repair brief",
+              proposedSpecDelta: synthesizedBrief,
+              implementationPlan: ""
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: synthesisTurn,
+              rawResponse: JSON.stringify(synthesisTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          const isRevision = input.prompt.includes("SYNTHESIZED WALKTHROUGH REPAIR BRIEF");
+          const specTurn = {
+            ...turn,
+            rawText: isRevision ? "Final revised spec" : "Reviewed spec",
+            summary: isRevision ? "Revision complete" : "Review complete",
+            proposedSpecDelta: isRevision ? "Final revised spec" : reviewedSpec,
+            implementationPlan: isRevision ? "Final revised plan" : reviewedPlan
+          };
+          yield {
+            type: "structured_turn",
+            actor: "claude",
+            turn: specTurn,
+            rawResponse: JSON.stringify(specTurn)
+          } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const orchestrator = createPhaseOrchestrator({ gpt, claude });
+
+      const result = await orchestrator.runSpecGeneration(
+        "s1",
+        "Design a task manager",
+        [{ question: "Scope?", answer: "Web only" }],
+        "Use React + Node"
+      );
+
+      expect(result.spec).toBe("Final revised spec");
+      expect(result.implementationPlan).toBe("Final revised plan");
+      expect(result.trace.gapSynthesis).toBeDefined();
+      expect(result.trace.revisionInputSynthesized).toBe(true);
+      expect(claudePrompts.some((entry) => entry.phase === "gap_synthesis")).toBe(true);
+      const revisionPrompt = claudePrompts.at(-1)!.prompt;
+      expect(revisionPrompt).toContain("SYNTHESIZED WALKTHROUGH REPAIR BRIEF");
+      expect(revisionPrompt).toContain("RC-1 covers gaps 1-35");
+    });
+  });
+
+  describe("runSpecRevision", () => {
+    it("digests large feedback then revises from the existing spec", async () => {
+      const gpt = createCapturingProvider("gpt", () => ({
+        actor: "gpt",
+        rawText: "Digest raw text fallback feedback-chunk-1",
+        summary: "Digest summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "Digest says update authentication. Source: feedback-chunk-1",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+      const claude = createCapturingProvider("claude", () => ({
+        actor: "claude",
+        rawText: "Revised overview",
+        summary: "Revised the existing spec using feedback",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "# Revised Spec",
+        milestoneReached: "implementation_plan_ready",
+        implementationPlan: "# Revised Plan",
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+        "sess_1",
+        {
+          originalProblem: "Original problem",
+          interviewResults: [{ question: "Scope?", answer: "Web only" }],
+          finalApproachHandoff: "Use the existing architecture",
+          currentSpec: "# Current Spec",
+          currentImplementationPlan: "# Current Plan",
+          feedbackRaw: "Tighten auth. ".repeat(1_000),
+          rawFeedbackBudgetChars: 500,
+          excerptBudgetChars: 100_000
+        },
+        "run_1"
+      );
+
+      expect(result.spec).toBe("# Revised Spec");
+      expect(result.implementationPlan).toBe("# Revised Plan");
+      expect(result.trace.feedbackDigest).toBeDefined();
+      expect(result.trace.revision).toBeDefined();
+      expect(result.revisionRequest.feedbackChunks.length).toBeGreaterThan(0);
+      expect(gpt.calls[0].phase).toBe("feedback_digest");
+      expect(claude.calls[0].phase).toBe("spec_generation");
+      expect(gpt.calls[0].prompt).toContain("PHASE: FEEDBACK DIGEST");
+      expect(claude.calls[0].prompt).toContain("CURRENT SPECIFICATION:");
+      expect(claude.calls[0].prompt).toContain("CURRENT IMPLEMENTATION PLAN:");
+      expect(claude.calls[0].prompt).toContain("EXACT FEEDBACK EXCERPTS:");
+      expect(claude.calls[0].prompt).not.toContain("HUMAN REVISION FEEDBACK:");
+    });
+
+    it("blocks when exact feedback excerpts exceed budget", async () => {
+      const events: ProgressEvent[] = [];
+      const unsubscribe = onProgress((event) => events.push(event));
+      const gpt = createCapturingProvider("gpt", () => ({
+        actor: "gpt",
+        rawText: "Digest raw text fallback feedback-chunk-1",
+        summary: "Digest summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "Digest requests every referenced change from feedback-chunk-1",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+      const claude = createCapturingProvider("claude", () => {
+        throw new Error("Claude revision should not be called");
+      });
+
+      let result: Awaited<ReturnType<ReturnType<typeof createPhaseOrchestrator>["runSpecRevision"]>>;
+      try {
+        result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+          "sess_1",
+          {
+            originalProblem: "Original problem",
+            interviewResults: [],
+            finalApproachHandoff: "Approach",
+            currentSpec: "# Current Spec",
+            currentImplementationPlan: "# Current Plan",
+            feedbackRaw: "x".repeat(20_000),
+            rawFeedbackBudgetChars: 500,
+            excerptBudgetChars: 10
+          },
+          "run_1"
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      expect(result.blockedReason).toBe("feedback_input_too_large");
+      expect(result.spec).toBe("# Current Spec");
+      expect(result.implementationPlan).toBe("# Current Plan");
+      expect(claude.calls).toHaveLength(0);
+      expect(events.some((event) => event.metadata?.blockedReason === "feedback_input_too_large")).toBe(true);
+    });
+
+    it("blocks when the digest references a missing feedback chunk", async () => {
+      const gpt = createCapturingProvider("gpt", () => ({
+        actor: "gpt",
+        rawText: "Digest references missing feedback-chunk-999",
+        summary: "Digest summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "Apply the requested auth change from feedback-chunk-999",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+      const claude = createCapturingProvider("claude", () => {
+        throw new Error("Claude revision should not be called");
+      });
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+        "sess_1",
+        {
+          originalProblem: "Original problem",
+          interviewResults: [],
+          finalApproachHandoff: "Approach",
+          currentSpec: "# Current Spec",
+          currentImplementationPlan: "# Current Plan",
+          feedbackRaw: "Tighten auth. ".repeat(1_000),
+          rawFeedbackBudgetChars: 500,
+          excerptBudgetChars: 10_000
+        },
+        "run_1"
+      );
+
+      expect(result.blockedReason).toBe("feedback_input_too_large");
+      expect(result.spec).toBe("# Current Spec");
+      expect(result.implementationPlan).toBe("# Current Plan");
+      expect(claude.calls).toHaveLength(0);
+    });
+
+    it("blocks when a large feedback digest omits feedback chunk references", async () => {
+      const gpt = createCapturingProvider("gpt", () => ({
+        actor: "gpt",
+        rawText: "Digest without source references",
+        summary: "Digest summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "Apply the requested auth change",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+      const claude = createCapturingProvider("claude", () => {
+        throw new Error("Claude revision should not be called");
+      });
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+        "sess_1",
+        {
+          originalProblem: "Original problem",
+          interviewResults: [],
+          finalApproachHandoff: "Approach",
+          currentSpec: "# Current Spec",
+          currentImplementationPlan: "# Current Plan",
+          feedbackRaw: "Tighten auth. ".repeat(1_000),
+          rawFeedbackBudgetChars: 500,
+          excerptBudgetChars: 100_000
+        },
+        "run_1"
+      );
+
+      expect(result.blockedReason).toBe("feedback_input_too_large");
+      expect(result.spec).toBe("# Current Spec");
+      expect(result.implementationPlan).toBe("# Current Plan");
+      expect(claude.calls).toHaveLength(0);
+    });
+
+    it("blocks before digesting when the feedback digest prompt exceeds budget", async () => {
+      const events: ProgressEvent[] = [];
+      const unsubscribe = onProgress((event) => events.push(event));
+      const gpt = createCapturingProvider("gpt", () => {
+        throw new Error("GPT digest should not be called");
+      });
+      const claude = createCapturingProvider("claude", () => {
+        throw new Error("Claude revision should not be called");
+      });
+
+      let result: Awaited<ReturnType<ReturnType<typeof createPhaseOrchestrator>["runSpecRevision"]>>;
+      try {
+        result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+          "sess_1",
+          {
+            originalProblem: "Original problem",
+            interviewResults: [],
+            finalApproachHandoff: "Approach",
+            currentSpec: "# Current Spec",
+            currentImplementationPlan: "# Current Plan",
+            feedbackRaw: "x".repeat(20_000),
+            rawFeedbackBudgetChars: 500,
+            digestPromptBudgetChars: 1_000,
+            excerptBudgetChars: 10_000
+          },
+          "run_1"
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      expect(result.blockedReason).toBe("feedback_input_too_large");
+      expect(result.revisionRequest.feedbackDigest).toBeNull();
+      expect(gpt.calls).toHaveLength(0);
+      expect(claude.calls).toHaveLength(0);
+      expect(events.some((event) => event.metadata?.blockedReason === "feedback_input_too_large")).toBe(true);
+    });
+
+    it("skips digest for small feedback", async () => {
+      const gpt = createCapturingProvider("gpt", () => {
+        throw new Error("GPT digest should not be called");
+      });
+      const claude = createCapturingProvider("claude", () => ({
+        actor: "claude",
+        rawText: "Small revision overview",
+        summary: "Applied small feedback",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: "# Revised Small Spec",
+        milestoneReached: "implementation_plan_ready",
+        implementationPlan: "# Revised Small Plan",
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      }));
+      const feedbackRaw = "Please rename setup to bootstrap.";
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+        "sess_1",
+        {
+          originalProblem: "Original problem",
+          interviewResults: [],
+          finalApproachHandoff: "Approach",
+          currentSpec: "# Current Spec",
+          currentImplementationPlan: "# Current Plan",
+          feedbackRaw,
+          rawFeedbackBudgetChars: 500
+        },
+        "run_1"
+      );
+
+      expect(gpt.calls).toHaveLength(0);
+      expect(claude.calls[0].prompt).toContain(feedbackRaw);
+      expect(result.spec).toBe("# Revised Small Spec");
+      expect(result.implementationPlan).toBe("# Revised Small Plan");
+      expect(result.trace.revision).toBeDefined();
+    });
+
+    it("blocks small feedback when exact excerpts exceed budget", async () => {
+      const gpt = createCapturingProvider("gpt", () => {
+        throw new Error("GPT digest should not be called");
+      });
+      const claude = createCapturingProvider("claude", () => {
+        throw new Error("Claude revision should not be called");
+      });
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecRevision(
+        "sess_1",
+        {
+          originalProblem: "Original problem",
+          interviewResults: [],
+          finalApproachHandoff: "Approach",
+          currentSpec: "# Current Spec",
+          currentImplementationPlan: "# Current Plan",
+          feedbackRaw: "Please rename setup to bootstrap.",
+          rawFeedbackBudgetChars: 500,
+          excerptBudgetChars: 10
+        },
+        "run_1"
+      );
+
+      expect(result.blockedReason).toBe("feedback_input_too_large");
+      expect(gpt.calls).toHaveLength(0);
+      expect(claude.calls).toHaveLength(0);
     });
   });
 });

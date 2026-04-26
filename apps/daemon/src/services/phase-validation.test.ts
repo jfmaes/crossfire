@@ -60,8 +60,29 @@ describe("phase-validation", () => {
     expect(result.missingFields).toEqual(["walkthroughGaps"]);
   });
 
+  it("only requires rawText and summary for gap synthesis turns", () => {
+    const result = validatePhaseTurn("gap_synthesis", {
+      rawText: "repair brief",
+      summary: "summary"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.missingFields).toEqual([]);
+  });
+
+  it("requires digest fields for feedback digest turns", () => {
+    const result = validatePhaseTurn("feedback_digest", {
+      rawText: "digest",
+      summary: "summary",
+      proposedSpecDelta: "- request"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.missingFields).toEqual([]);
+  });
+
   it("includes rawText and summary in every phase contract", () => {
-    for (const phase of ["analysis", "analysis_debate", "approach_debate", "spec_generation", "walkthrough"] as const) {
+    for (const phase of ["analysis", "analysis_debate", "approach_debate", "feedback_digest", "spec_generation", "walkthrough", "gap_synthesis"] as const) {
       expect(getRequiredFieldsForPhase(phase)).toEqual(
         expect.arrayContaining(["rawText", "summary"])
       );

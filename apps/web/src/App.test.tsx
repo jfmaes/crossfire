@@ -58,6 +58,12 @@ describe("App", () => {
   });
 
   it("renders clarification-needed approach debate state from a session deeplink", async () => {
+    const scrollTargets: HTMLElement[] = [];
+    const scrollOptions: unknown[] = [];
+    window.HTMLElement.prototype.scrollIntoView = vi.fn(function (this: HTMLElement, options?: unknown) {
+      scrollTargets.push(this);
+      scrollOptions.push(options);
+    });
     location.hash = "#/session/sess_1";
     getSessionMock.mockResolvedValue({
       session: {
@@ -100,5 +106,11 @@ describe("App", () => {
     expect(screen.getAllByText("The debate paused for your input").length).toBeGreaterThan(0);
     expect(screen.getAllByText("The approach debate is blocked on your input").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Which deployment environment is authoritative?").length).toBeGreaterThan(0);
+    expect(screen.getByPlaceholderText("Provide the clarification the models asked for...")).toBeTruthy();
+
+    await waitFor(() => {
+      expect(scrollTargets.at(-1)?.classList.contains("challenge-feedback-submit")).toBe(true);
+      expect(scrollOptions.at(-1)).toEqual({ behavior: "auto", block: "center" });
+    });
   });
 });

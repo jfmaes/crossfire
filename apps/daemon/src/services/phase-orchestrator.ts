@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { ProviderAdapter } from "@council/adapters";
 import {
   buildAnalysisPrompt,
+  buildFeedbackDigestPrompt,
   buildQuestionDebatePrompt,
+  buildSpecRevisionPrompt,
   buildSpecPrompt,
   buildWalkthroughPrompt
 } from "@council/adapters";
@@ -10,6 +12,12 @@ import { emitProgress, summarizeProgressText } from "./progress";
 import { createOrchestrator } from "./orchestrator";
 import { debugLogPrompt, debugLogResponse } from "./debug-log";
 import { validatePhaseTurn, type PhaseValidationPhase } from "./phase-validation";
+import {
+  buildRevisionBudgetLedger,
+  chunkFeedback,
+  selectFeedbackExcerpts,
+  type FeedbackChunk
+} from "./revision-feedback";
 
 interface PhaseOrchestratorInput {
   gpt: ProviderAdapter;
@@ -79,8 +87,10 @@ interface SpecGenerationResult {
     review: TurnTrace;
     gptWalkthrough: TurnTrace;
     claudeWalkthrough: TurnTrace;
+    gapSynthesis?: TurnTrace;
     revision?: TurnTrace;
     revisedAfterWalkthrough: boolean;
+    revisionInputSynthesized: boolean;
     gapCount: number;
     freshContext: {
       draft: boolean;
@@ -98,6 +108,22 @@ interface SpecGenerationResult {
       peerDraft: boolean;
       revisionPeerDraft: boolean;
     };
+  };
+}
+
+interface SpecRevisionResult {
+  spec: string;
+  implementationPlan: string;
+  summary: string;
+  blockedReason?: "feedback_input_too_large";
+  revisionRequest: {
+    feedbackChunks: Array<Record<string, unknown>>;
+    feedbackDigest: Record<string, unknown> | null;
+    budgetLedger: Record<string, unknown>;
+  };
+  trace: {
+    feedbackDigest?: TurnTrace;
+    revision?: TurnTrace;
   };
 }
 
@@ -153,6 +179,10 @@ class AuthorityInputTooLargeError extends Error {
     this.name = "AuthorityInputTooLargeError";
   }
 }
+
+const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
+const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
+const REVISION_INPUT_BUDGET_CHARS = 250_000;
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
   // Try direct parse first
@@ -643,7 +673,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         phase: "spec_generation",
         component: "finalApproachHandoff",
         text: finalApproachHandoff,
-        budgetChars: 20_000,
+        budgetChars: FINAL_APPROACH_HANDOFF_BUDGET_CHARS,
         errorCode: "spec_generation_input_too_large"
       });
       const approachLedgerEntry = makePromptLedgerEntry("finalApproachHandoff", finalApproachHandoff);
@@ -686,7 +716,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         phase: "spec_generation",
         component: "peerDraft",
         text: peerDraft,
-        budgetChars: 30_000,
+        budgetChars: SPEC_GENERATION_DRAFT_BUDGET_CHARS,
         errorCode: "spec_generation_input_too_large"
       });
       const peerDraftLedgerEntry = makePromptLedgerEntry("peerDraft", peerDraft);
@@ -773,37 +803,87 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       let implementationPlan = reviewedPlan;
       let summary = (reviewResult.parsed?.summary as string) || "Spec and implementation plan generated";
       let revisionTrace: TurnTrace | undefined;
+      let gapSynthesisTrace: TurnTrace | undefined;
+      let revisionInputSynthesized = false;
 
       if (allGaps.length > 0) {
         emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
 
-        const gapReport = allGaps
-          .map((g, i) => `${i + 1}. **${g.location}**: ${g.issue}\n   Fix: ${g.fix}`)
-          .join("\n\n");
-
-        const revisionPeerDraft = [
+        const gapReport = formatWalkthroughGapReport(allGaps);
+        let revisionPeerDraft = buildRevisionPeerDraft({
           reviewedSpec,
-          "",
-          "---",
-          "",
-          `IMPLEMENTATION PLAN:`,
           reviewedPlan,
-          "",
-          "---",
-          "",
-          `ADVERSARIAL WALKTHROUGH FINDINGS:`,
-          `Both models independently simulated executing this spec and found the following operational gaps.`,
-          `Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.`,
-          "",
-          gapReport
-        ].join("\n");
+          gapReport,
+          synthesized: false
+        });
+
+        if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
+          emitProgress({
+            sessionId,
+            runId,
+            type: "info",
+            phase: "gap_synthesis",
+            metadata: {
+              authorityInput: {
+                component: "revisionPeerDraft",
+                actualChars: revisionPeerDraft.length,
+                budgetChars: REVISION_INPUT_BUDGET_CHARS
+              },
+              gapSynthesis: {
+                originalGapCount: allGaps.length,
+                originalChars: gapReport.length
+              }
+            },
+            message: `revision input exceeds ${REVISION_INPUT_BUDGET_CHARS} chars; synthesizing walkthrough gaps`
+          });
+
+          const synthesisPrompt = buildGapSynthesisPrompt({
+            originalProblem: prompt,
+            gaps: allGaps
+          });
+          const synthesisResult = await collectTurnOutput(input.claude, {
+            sessionId,
+            runId,
+            prompt: synthesisPrompt,
+            phase: "gap_synthesis",
+            promptLedger: [
+              makePromptLedgerEntry("originalProblem", prompt),
+              makePromptLedgerEntry("walkthroughGaps", gapReport)
+            ]
+          });
+          gapSynthesisTrace = synthesisResult.trace;
+          const synthesizedGapReport = extractGapSynthesisBrief(synthesisResult, gapReport);
+          revisionPeerDraft = buildRevisionPeerDraft({
+            reviewedSpec,
+            reviewedPlan,
+            gapReport: synthesizedGapReport,
+            synthesized: true
+          });
+          revisionInputSynthesized = true;
+
+          emitProgress({
+            sessionId,
+            runId,
+            type: "info",
+            phase: "gap_synthesis",
+            metadata: {
+              gapSynthesis: {
+                originalGapCount: allGaps.length,
+                originalChars: gapReport.length,
+                finalChars: synthesizedGapReport.length
+              }
+            },
+            message: `Synthesized ${allGaps.length} walkthrough gap(s) into ${synthesizedGapReport.length} chars`
+          });
+        }
+
         ensureAuthorityInputFits({
           sessionId,
           runId,
           phase: "spec_generation",
           component: "revisionPeerDraft",
           text: revisionPeerDraft,
-          budgetChars: 30_000,
+          budgetChars: REVISION_INPUT_BUDGET_CHARS,
           errorCode: "revision_input_too_large"
         });
         const revisionPeerDraftLedgerEntry = makePromptLedgerEntry("revisionPeerDraft", revisionPeerDraft);
@@ -855,8 +935,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           review: reviewResult.trace,
           gptWalkthrough: gptWalkthrough.trace,
           claudeWalkthrough: claudeWalkthrough.trace,
+          gapSynthesis: gapSynthesisTrace,
           revision: revisionTrace,
           revisedAfterWalkthrough: allGaps.length > 0,
+          revisionInputSynthesized,
           gapCount: allGaps.length,
           freshContext: {
             draft: true,
@@ -876,8 +958,278 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           }
         }
       };
+    },
+
+    async runSpecRevision(
+      sessionId: string,
+      revisionInput: {
+        originalProblem: string;
+        interviewResults: Array<{ question: string; answer: string }>;
+        finalApproachHandoff: string;
+        currentSpec: string;
+        currentImplementationPlan: string;
+        feedbackRaw: string;
+        rawFeedbackBudgetChars?: number;
+        excerptBudgetChars?: number;
+        digestPromptBudgetChars?: number;
+      },
+      runId?: string
+    ): Promise<SpecRevisionResult> {
+      emitProgress({
+        sessionId,
+        runId,
+        type: "phase_start",
+        phase: "spec_generation",
+        message: "Spec Revision (feedback digest -> exact excerpts -> Claude revision)"
+      });
+
+      const rawFeedbackBudgetChars = revisionInput.rawFeedbackBudgetChars ?? 12_000;
+      const excerptBudgetChars = revisionInput.excerptBudgetChars ?? 30_000;
+      const digestPromptBudgetChars = revisionInput.digestPromptBudgetChars ?? REVISION_INPUT_BUDGET_CHARS;
+      const feedbackChunks = chunkFeedback(revisionInput.feedbackRaw);
+      const feedbackChunkMetadata = feedbackChunks.map(toFeedbackChunkMetadata);
+
+      let feedbackDigestText = revisionInput.feedbackRaw;
+      let feedbackDigestRecord: Record<string, unknown> | null = {
+        rawText: revisionInput.feedbackRaw,
+        summary: "Raw feedback used directly because it fit within budget.",
+        proposedSpecDelta: revisionInput.feedbackRaw,
+        skipped: true
+      };
+      let feedbackDigestTrace: TurnTrace | undefined;
+      let requestedChunkIds = feedbackChunks.map((chunk) => chunk.id);
+
+      if (revisionInput.feedbackRaw.length > rawFeedbackBudgetChars) {
+        const digestPrompt = buildFeedbackDigestPrompt({
+          originalProblem: revisionInput.originalProblem,
+          feedbackChunks
+        });
+
+        if (digestPrompt.length > digestPromptBudgetChars) {
+          const budgetLedger = buildRevisionLedgerRecord({
+            feedbackRaw: revisionInput.feedbackRaw,
+            feedbackDigest: "",
+            feedbackExcerpts: "",
+            currentSpec: revisionInput.currentSpec,
+            currentPlan: revisionInput.currentImplementationPlan
+          });
+          emitFeedbackRevisionBlocked({
+            sessionId,
+            runId,
+            reason: "feedback digest prompt exceeded budget",
+            metadata: {
+              feedbackRawChars: revisionInput.feedbackRaw.length,
+              digestPromptChars: digestPrompt.length,
+              digestPromptBudgetChars
+            }
+          });
+
+          return {
+            spec: revisionInput.currentSpec,
+            implementationPlan: revisionInput.currentImplementationPlan,
+            summary: "Feedback is too large to digest safely.",
+            blockedReason: "feedback_input_too_large",
+            revisionRequest: {
+              feedbackChunks: feedbackChunkMetadata,
+              feedbackDigest: null,
+              budgetLedger
+            },
+            trace: {}
+          };
+        }
+
+        const digestResult = await collectTurnOutput(input.gpt, {
+          sessionId,
+          runId,
+          prompt: digestPrompt,
+          phase: "feedback_digest",
+          promptLedger: [
+            makePromptLedgerEntry("originalProblem", revisionInput.originalProblem),
+            makePromptLedgerEntry("feedbackRaw", revisionInput.feedbackRaw)
+          ]
+        });
+
+        feedbackDigestTrace = digestResult.trace;
+        feedbackDigestRecord = digestResult.parsed;
+        feedbackDigestText =
+          (digestResult.parsed?.proposedSpecDelta as string) ||
+          (digestResult.parsed?.rawText as string) ||
+          digestResult.rawText;
+        requestedChunkIds = extractFeedbackChunkIds(feedbackDigestText);
+
+        if (requestedChunkIds.length === 0) {
+          const budgetLedger = buildRevisionLedgerRecord({
+            feedbackRaw: revisionInput.feedbackRaw,
+            feedbackDigest: feedbackDigestText,
+            feedbackExcerpts: "",
+            currentSpec: revisionInput.currentSpec,
+            currentPlan: revisionInput.currentImplementationPlan
+          });
+          emitFeedbackRevisionBlocked({
+            sessionId,
+            runId,
+            reason: "feedback digest omitted source chunk references",
+            metadata: {
+              feedbackRawChars: revisionInput.feedbackRaw.length,
+              feedbackDigestChars: feedbackDigestText.length
+            }
+          });
+
+          return {
+            spec: revisionInput.currentSpec,
+            implementationPlan: revisionInput.currentImplementationPlan,
+            summary: "Feedback digest did not preserve source chunk traceability.",
+            blockedReason: "feedback_input_too_large",
+            revisionRequest: {
+              feedbackChunks: feedbackChunkMetadata,
+              feedbackDigest: feedbackDigestRecord,
+              budgetLedger
+            },
+            trace: {
+              feedbackDigest: feedbackDigestTrace
+            }
+          };
+        }
+      }
+
+      const excerptSelection = selectFeedbackExcerpts({
+        chunks: feedbackChunks,
+        requestedChanges: [{
+          summary: "Requested changes extracted from feedback",
+          sourceChunkIds: requestedChunkIds
+        }],
+        budgetChars: excerptBudgetChars
+      });
+      const feedbackExcerpts = excerptSelection.text;
+      const budgetLedger = buildRevisionLedgerRecord({
+        feedbackRaw: revisionInput.feedbackRaw,
+        feedbackDigest: feedbackDigestText,
+        feedbackExcerpts,
+        currentSpec: revisionInput.currentSpec,
+        currentPlan: revisionInput.currentImplementationPlan
+      });
+
+      if (excerptSelection.blocked) {
+        emitFeedbackRevisionBlocked({
+          sessionId,
+          runId,
+          reason: "feedback exact excerpts exceeded budget or referenced missing chunks",
+          metadata: {
+            feedbackRawChars: revisionInput.feedbackRaw.length,
+            feedbackDigestChars: feedbackDigestText.length,
+            feedbackExcerptsChars: feedbackExcerpts.length,
+            excerptBudgetChars,
+            missingChunkIds: excerptSelection.missingChunkIds
+          }
+        });
+
+        return {
+          spec: revisionInput.currentSpec,
+          implementationPlan: revisionInput.currentImplementationPlan,
+          summary: "Feedback is too large to revise safely with exact excerpts.",
+          blockedReason: "feedback_input_too_large",
+          revisionRequest: {
+            feedbackChunks: feedbackChunkMetadata,
+            feedbackDigest: feedbackDigestRecord,
+            budgetLedger
+          },
+          trace: {
+            feedbackDigest: feedbackDigestTrace
+          }
+        };
+      }
+
+      const revisionResult = await collectTurnOutput(input.claude, {
+        sessionId,
+        runId,
+        prompt: buildSpecRevisionPrompt({
+          originalProblem: revisionInput.originalProblem,
+          interviewResults: revisionInput.interviewResults,
+          approachResult: revisionInput.finalApproachHandoff,
+          currentSpec: revisionInput.currentSpec,
+          currentImplementationPlan: revisionInput.currentImplementationPlan,
+          feedbackDigest: feedbackDigestText,
+          feedbackExcerpts
+        }),
+        phase: "spec_generation",
+        promptLedger: [
+          makePromptLedgerEntry("originalProblem", revisionInput.originalProblem),
+          makePromptLedgerEntry("interviewResults", revisionInput.interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+          makePromptLedgerEntry("finalApproachHandoff", revisionInput.finalApproachHandoff),
+          makePromptLedgerEntry("currentSpec", revisionInput.currentSpec),
+          makePromptLedgerEntry("currentImplementationPlan", revisionInput.currentImplementationPlan),
+          makePromptLedgerEntry("feedbackDigest", feedbackDigestText),
+          makePromptLedgerEntry("feedbackExcerpts", feedbackExcerpts)
+        ]
+      });
+
+      return {
+        spec:
+          (revisionResult.parsed?.proposedSpecDelta as string) ||
+          (revisionResult.parsed?.rawText as string) ||
+          revisionResult.rawText ||
+          revisionInput.currentSpec,
+        implementationPlan:
+          (revisionResult.parsed?.implementationPlan as string) ||
+          revisionInput.currentImplementationPlan,
+        summary:
+          (revisionResult.parsed?.summary as string) ||
+          "Spec and implementation plan revised from feedback",
+        revisionRequest: {
+          feedbackChunks: feedbackChunkMetadata,
+          feedbackDigest: feedbackDigestRecord,
+          budgetLedger
+        },
+        trace: {
+          feedbackDigest: feedbackDigestTrace,
+          revision: revisionResult.trace
+        }
+      };
     }
   };
+}
+
+function toFeedbackChunkMetadata(chunk: FeedbackChunk): Record<string, unknown> {
+  return {
+    id: chunk.id,
+    index: chunk.index,
+    startOffset: chunk.startOffset,
+    endOffset: chunk.endOffset,
+    textChars: chunk.text.length
+  };
+}
+
+function extractFeedbackChunkIds(digestText: string): string[] {
+  return Array.from(new Set(digestText.match(/feedback-chunk-\d+/g) ?? []));
+}
+
+function buildRevisionLedgerRecord(input: {
+  feedbackRaw: string;
+  feedbackDigest: string;
+  feedbackExcerpts: string;
+  currentSpec: string;
+  currentPlan: string;
+}): Record<string, unknown> {
+  return { ...buildRevisionBudgetLedger(input) };
+}
+
+function emitFeedbackRevisionBlocked(input: {
+  sessionId: string;
+  runId?: string;
+  reason: string;
+  metadata?: Record<string, unknown>;
+}): void {
+  emitProgress({
+    sessionId: input.sessionId,
+    runId: input.runId,
+    type: "info",
+    phase: "spec_generation",
+    metadata: {
+      blockedReason: "feedback_input_too_large",
+      ...input.metadata
+    },
+    message: `feedback input too large: ${input.reason}`
+  });
 }
 
 function makePromptLedgerEntry(
@@ -1073,6 +1425,115 @@ function extractSynthesizedQuestions(
   }
 
   return extractProposedQuestions(parsed, (parsed.actor as "gpt" | "claude") || "gpt");
+}
+
+function formatWalkthroughGapReport(gaps: WalkthroughGap[]): string {
+  return gaps
+    .map((gap, index) => `${index + 1}. **${gap.location}**: ${gap.issue}\n   Fix: ${gap.fix}`)
+    .join("\n\n");
+}
+
+function buildRevisionPeerDraft(input: {
+  reviewedSpec: string;
+  reviewedPlan: string;
+  gapReport: string;
+  synthesized: boolean;
+}): string {
+  const heading = input.synthesized
+    ? "SYNTHESIZED WALKTHROUGH REPAIR BRIEF"
+    : "ADVERSARIAL WALKTHROUGH FINDINGS";
+  const provenance = input.synthesized
+    ? "The raw walkthrough findings were too large for the revision prompt, so Claude first clustered them into the repair brief below. The brief must preserve coverage of the original gap numbers."
+    : "Both models independently simulated executing this spec and found the following operational gaps.";
+
+  return [
+    input.reviewedSpec,
+    "",
+    "---",
+    "",
+    "IMPLEMENTATION PLAN:",
+    input.reviewedPlan,
+    "",
+    "---",
+    "",
+    `${heading}:`,
+    provenance,
+    "Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.",
+    "",
+    input.gapReport
+  ].join("\n");
+}
+
+function buildGapSynthesisPrompt(input: {
+  originalProblem: string;
+  gaps: WalkthroughGap[];
+}): string {
+  const gapReport = formatWalkthroughGapReport(input.gaps);
+
+  return [
+    "PHASE: WALKTHROUGH GAP SYNTHESIS",
+    "",
+    "The raw adversarial walkthrough gap report is too large to include verbatim in the final revision prompt.",
+    "Synthesize the findings into a compact root-cause repair brief for the revision model.",
+    "",
+    "Rules:",
+    "- Preserve every original gap by number. Each original gap number must appear in exactly one repair item.",
+    "- Merge duplicates and symptoms that share the same root cause.",
+    "- Keep concrete fixes, affected sections, acceptance criteria, ordering constraints, and failure/rollback behavior.",
+    "- Do not include broad commentary, debate history, or generic advice.",
+    "- Target 12,000 characters or less unless preserving coverage requires slightly more.",
+    "",
+    "Respond ONLY with a JSON object matching the normal Crossfire model-turn shape.",
+    "Put the markdown repair brief in both rawText and proposedSpecDelta. Use neutral values for unrelated fields:",
+    "{",
+    "  \"rawText\": \"markdown repair brief with repair items and covered gap numbers\",",
+    "  \"summary\": \"one sentence summary\",",
+    "  \"newInsights\": [],",
+    "  \"assumptions\": [],",
+    "  \"disagreements\": [],",
+    "  \"questionsForPeer\": [],",
+    "  \"questionsForHuman\": [],",
+    "  \"proposedSpecDelta\": \"same markdown repair brief\",",
+    "  \"milestoneReached\": \"implementation_plan_ready\",",
+    "  \"implementationPlan\": null,",
+    "  \"proposedQuestions\": null,",
+    "  \"synthesizedQuestions\": null,",
+    "  \"followUpQuestions\": null,",
+    "  \"sufficientContext\": null,",
+    "  \"walkthroughGaps\": null",
+    "}",
+    "",
+    "---",
+    "",
+    "ORIGINAL PROBLEM:",
+    input.originalProblem,
+    "",
+    "---",
+    "",
+    "RAW WALKTHROUGH GAPS:",
+    gapReport
+  ].join("\n");
+}
+
+function extractGapSynthesisBrief(
+  result: { rawText: string; parsed: Record<string, unknown> | null },
+  fallback: string
+): string {
+  const proposedSpecDelta = result.parsed?.proposedSpecDelta;
+  if (typeof proposedSpecDelta === "string" && proposedSpecDelta.trim()) {
+    return proposedSpecDelta.trim();
+  }
+
+  const rawText = result.parsed?.rawText;
+  if (typeof rawText === "string" && rawText.trim()) {
+    return rawText.trim();
+  }
+
+  if (result.rawText.trim()) {
+    return result.rawText.trim();
+  }
+
+  return fallback;
 }
 
 function extractWalkthroughGaps(

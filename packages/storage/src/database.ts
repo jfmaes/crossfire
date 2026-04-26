@@ -59,6 +59,24 @@ function applySchema(db: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
 
+    CREATE TABLE IF NOT EXISTS revision_requests (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      feedback_raw TEXT NOT NULL,
+      feedback_chunks_json TEXT NOT NULL,
+      feedback_digest_json TEXT,
+      budget_ledger_json TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id),
+      FOREIGN KEY (run_id) REFERENCES session_runs(id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS revision_requests_run_id_unique
+      ON revision_requests(run_id);
+
     CREATE TABLE IF NOT EXISTS session_run_events (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,

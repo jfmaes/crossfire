@@ -333,3 +333,106 @@ export function buildWalkthroughPrompt(input: {
     input.implementationPlan
   ].join("\n");
 }
+
+export function buildFeedbackDigestPrompt(input: {
+  originalProblem: string;
+  feedbackChunks: Array<{ id: string; startOffset: number; endOffset: number; text: string }>;
+}): string {
+  const chunks = input.feedbackChunks
+    .map((chunk) => `### ${chunk.id} [${chunk.startOffset}-${chunk.endOffset}]\n${chunk.text}`)
+    .join("\n\n");
+
+  return [
+    "PHASE: FEEDBACK DIGEST",
+    "",
+    "Extract concrete requested changes from the human feedback chunks.",
+    "The raw feedback chunks are authoritative. Preserve traceability.",
+    "Every requested change MUST include sourceChunkIds.",
+    "",
+    "Respond ONLY with a JSON object:",
+    "{",
+    "  \"rawText\": \"markdown digest\",",
+    "  \"summary\": \"one sentence summary\",",
+    "  \"proposedSpecDelta\": \"markdown digest with source chunk ids\"",
+    "}",
+    "",
+    "---",
+    "",
+    "ORIGINAL PROBLEM:",
+    input.originalProblem,
+    "",
+    "---",
+    "",
+    "FEEDBACK CHUNKS:",
+    chunks
+  ].join("\n");
+}
+
+export function buildSpecRevisionPrompt(input: {
+  originalProblem: string;
+  interviewResults: Array<{ question: string; answer: string }>;
+  approachResult: string;
+  currentSpec: string;
+  currentImplementationPlan: string;
+  feedbackDigest: string;
+  feedbackExcerpts: string;
+}): string {
+  const interviewContext = input.interviewResults
+    .map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`)
+    .join("\n\n");
+
+  return [
+    getPersona("claude"),
+    "",
+    ANTI_SYCOPHANCY,
+    "",
+    "PHASE: SPEC REVISION",
+    "Revise the existing specification and implementation plan using the human feedback.",
+    "Do not restart the architecture from scratch unless the exact feedback asks for that.",
+    "The exact feedback excerpts are authoritative. If the digest and an excerpt conflict, the excerpt wins.",
+    "",
+    "Respond ONLY with a JSON object:",
+    "{",
+    "  \"rawText\": \"brief overview of the revision\",",
+    "  \"summary\": \"one paragraph summary\",",
+    "  \"proposedSpecDelta\": \"the full revised specification in markdown\",",
+    "  \"milestoneReached\": \"implementation_plan_ready\",",
+    "  \"implementationPlan\": \"the full revised implementation plan in markdown\"",
+    "}",
+    "",
+    "---",
+    "",
+    "ORIGINAL PROBLEM:",
+    input.originalProblem,
+    "",
+    "---",
+    "",
+    "INTERVIEW RESULTS:",
+    interviewContext,
+    "",
+    "---",
+    "",
+    "CONVERGED APPROACH:",
+    input.approachResult,
+    "",
+    "---",
+    "",
+    "CURRENT SPECIFICATION:",
+    input.currentSpec,
+    "",
+    "---",
+    "",
+    "CURRENT IMPLEMENTATION PLAN:",
+    input.currentImplementationPlan,
+    "",
+    "---",
+    "",
+    "FEEDBACK DIGEST:",
+    input.feedbackDigest,
+    "",
+    "---",
+    "",
+    "EXACT FEEDBACK EXCERPTS:",
+    input.feedbackExcerpts
+  ].join("\n");
+}
