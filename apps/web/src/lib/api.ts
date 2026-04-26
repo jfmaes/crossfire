@@ -68,6 +68,17 @@ export interface CompactionMetadata {
   sectionsCompacted?: string[];
 }
 
+export type SessionMode = "new_spec" | "existing_spec";
+
+export interface ExistingSpecInput {
+  spec?: string;
+  specPath?: string;
+  specFileName?: string;
+  implementationPlan?: string;
+  implementationPlanPath?: string;
+  implementationPlanFileName?: string;
+}
+
 export interface TurnTrace {
   outputStatus?: "ok" | "degraded" | "phase_invalid" | "provider_error";
   missingFields?: string[];
@@ -140,6 +151,14 @@ export interface SessionPayload {
     prompt?: string | null;
     executionPolicy?: {
       approachDebateMaxTurns?: number;
+      mode?: SessionMode;
+      existingSpecSources?: Array<{
+        label: "spec" | "implementationPlan";
+        sourceType: "text" | "path";
+        path?: string | null;
+        fileName?: string | null;
+        chars: number;
+      }>;
     } | null;
   };
   summary: {
@@ -246,13 +265,17 @@ export async function createSession(input: {
   title: string;
   prompt: string;
   executionPolicy?: { approachDebateMaxTurns?: number };
+  mode?: SessionMode;
+  existingSpec?: ExistingSpecInput;
   token: string;
   baseUrl?: string;
 }) {
   const body = {
     title: input.title,
     prompt: input.prompt,
-    executionPolicy: input.executionPolicy
+    executionPolicy: input.executionPolicy,
+    mode: input.mode,
+    existingSpec: input.existingSpec
   };
 
   const response = await fetch(`${input.baseUrl ?? ""}/sessions`, {

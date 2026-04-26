@@ -1,7 +1,19 @@
 import type Database from "better-sqlite3";
 
+export type SessionMode = "new_spec" | "existing_spec";
+
+export interface ExistingSpecSourceMetadata {
+  label: "spec" | "implementationPlan";
+  sourceType: "text" | "path";
+  path?: string | null;
+  fileName?: string | null;
+  chars: number;
+}
+
 export interface ExecutionPolicy {
   approachDebateMaxTurns?: number;
+  mode?: SessionMode;
+  existingSpecSources?: ExistingSpecSourceMetadata[];
 }
 
 export interface SessionRow {
