@@ -249,6 +249,10 @@ export function createSessionService(input: SessionServiceInput) {
     }
   }
 
+  function clearSpecGenerationFailure(sessionId: string) {
+    input.repository.deletePhaseResult(sessionId, "spec_generation_failure");
+  }
+
   async function buildSessionPayload(id: string): Promise<SessionServicePayload | null> {
     const session = input.repository.findById(id);
     const summary = input.repository.findSummaryBySessionId(id);
@@ -892,6 +896,7 @@ export function createSessionService(input: SessionServiceInput) {
 
         case "spec_generation": {
           input.repository.deletePhaseResult(id, "spec_generation");
+          clearSpecGenerationFailure(id);
           await clearCurrentArtifact(id);
 
           const approachResult = getPhaseResult(id, "approach_debate") as {
@@ -1403,6 +1408,7 @@ export function createSessionService(input: SessionServiceInput) {
       sessionId: id, phase: "spec_generation",
       resultJson: JSON.stringify(specResult)
     });
+    clearSpecGenerationFailure(id);
 
     let artifactPath: string | null = null;
     if (input.artifactsDirectory) {
@@ -1541,6 +1547,7 @@ export function createSessionService(input: SessionServiceInput) {
       sessionId: id, phase: "spec_generation",
       resultJson: JSON.stringify(specResult)
     });
+    clearSpecGenerationFailure(id);
 
     let artifactPath: string | null = null;
     if (input.artifactsDirectory) {

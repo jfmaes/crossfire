@@ -87,6 +87,236 @@ function seedSpecCheckpoint(repository: SessionRepository) {
   });
 }
 
+function seedApproachCheckpoint(repository: SessionRepository, sessionId = "sess_specgen") {
+  repository.create({
+    id: sessionId,
+    title: "Spec generation session",
+    status: "checkpoint",
+    phase: "approach_debate",
+    prompt: "Design a task manager"
+  });
+  repository.saveSummary({
+    sessionId,
+    currentUnderstanding: "Approach ready for spec generation.",
+    recommendation: "Approve approach to proceed to spec generation.",
+    changedSinceLastCheckpoint: ["Approach debate converged"],
+    openRisks: [],
+    decisionsNeeded: ["Approve approach to proceed to spec generation"],
+    artifactPath: null
+  });
+  repository.savePhaseResult({
+    sessionId,
+    phase: "approach_debate",
+    resultJson: JSON.stringify({
+      convergedApproach: "Use a simple web architecture.",
+      finalApproachHandoff: "Use React + Node.",
+      questionsForHuman: [],
+      trace: {
+        stopReason: "consensus",
+        finalDisagreements: []
+      }
+    })
+  });
+}
+
+function createSpecGenerationProviders(mode: "always_fail" | "fail_once_then_succeed"): {
+  gpt: ProviderAdapter;
+  claude: ProviderAdapter;
+} {
+  let failedRevisionAttempts = 0;
+  const reviewedSpec = "# Reviewed Spec\n\nShip the task manager.";
+  const reviewedPlan = "# Reviewed Plan\n\n1. Build the task manager.";
+  const degradedRevisionResponse = [
+    "Here is the JSON you requested:",
+    JSON.stringify({
+      actor: "claude",
+      rawText: "Revision raw response body",
+      summary: "Revision summary",
+      newInsights: [],
+      assumptions: [],
+      disagreements: [],
+      questionsForPeer: [],
+      questionsForHuman: [],
+      proposedSpecDelta: "Revised spec content",
+      milestoneReached: "implementation_plan_ready",
+      implementationPlan: "Revised plan",
+      proposedQuestions: null,
+      synthesizedQuestions: null,
+      followUpQuestions: null,
+      sufficientContext: null,
+      walkthroughGaps: null,
+      degraded: true
+    }),
+    "Thanks."
+  ].join("\n");
+
+  const gpt: ProviderAdapter = {
+    name: "gpt",
+    async *sendTurn(input: ProviderTurnInput) {
+      const isWalkthrough = input.phase === "walkthrough";
+      const turn: ModelTurn = {
+        actor: "gpt",
+        rawText: isWalkthrough ? "GPT found rollback gaps" : "GPT draft",
+        summary: isWalkthrough ? "GPT walkthrough" : "GPT draft summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: isWalkthrough ? "" : "Draft spec content",
+        milestoneReached: isWalkthrough ? null : "implementation_plan_ready",
+        implementationPlan: isWalkthrough ? null : "Draft implementation plan",
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: isWalkthrough
+          ? [{ location: "Section 2", issue: "Missing rollback behavior", fix: "Add rollback steps" }]
+          : null,
+        degraded: false
+      };
+      yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+
+  const claude: ProviderAdapter = {
+    name: "claude",
+    async *sendTurn(input: ProviderTurnInput) {
+      if (input.phase === "walkthrough") {
+        const walkthroughTurn: ModelTurn = {
+          actor: "claude",
+          rawText: "Claude found no extra gaps",
+          summary: "Claude walkthrough",
+          newInsights: [],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: "",
+          milestoneReached: null,
+          implementationPlan: null,
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: [],
+          degraded: false
+        };
+        yield {
+          type: "structured_turn",
+          actor: "claude",
+          turn: walkthroughTurn,
+          rawResponse: JSON.stringify(walkthroughTurn)
+        } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      const isRevision = input.phase === "spec_generation"
+        && input.prompt.includes("ADVERSARIAL WALKTHROUGH FINDINGS:");
+      if (isRevision) {
+        const shouldFail = mode === "always_fail"
+          || (mode === "fail_once_then_succeed" && failedRevisionAttempts === 0);
+
+        if (shouldFail) {
+          failedRevisionAttempts += 1;
+          const degradedTurn: ModelTurn = {
+            actor: "claude",
+            rawText: degradedRevisionResponse,
+            summary: "Revision summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: "",
+            milestoneReached: "implementation_plan_ready",
+            implementationPlan: null,
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: null,
+            degraded: true
+          };
+          yield {
+            type: "structured_turn",
+            actor: "claude",
+            turn: degradedTurn,
+            rawResponse: degradedRevisionResponse
+          } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+
+        const revisionTurn: ModelTurn = {
+          actor: "claude",
+          rawText: "Final revised spec",
+          summary: "Revision complete",
+          newInsights: [],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: "Final revised spec",
+          milestoneReached: "implementation_plan_ready",
+          implementationPlan: "Final revised plan",
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: null,
+          degraded: false
+        };
+        yield {
+          type: "structured_turn",
+          actor: "claude",
+          turn: revisionTurn,
+          rawResponse: JSON.stringify(revisionTurn)
+        } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      const reviewTurn: ModelTurn = {
+        actor: "claude",
+        rawText: "Claude review",
+        summary: "Claude review summary",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: [],
+        proposedSpecDelta: reviewedSpec,
+        milestoneReached: "implementation_plan_ready",
+        implementationPlan: reviewedPlan,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null,
+        degraded: false
+      };
+      yield {
+        type: "structured_turn",
+        actor: "claude",
+        turn: reviewTurn,
+        rawResponse: JSON.stringify(reviewTurn)
+      } as const;
+      yield { type: "done" } as const;
+    },
+    async healthCheck() {
+      return { ok: true, detail: "ready" };
+    }
+  };
+
+  return { gpt, claude };
+}
+
 describe("createSessionService", () => {
   async function waitForSettledSession(
     service: ReturnType<typeof createSessionService>,
@@ -284,6 +514,85 @@ describe("createSessionService", () => {
     expect(specResult.spec).toBe("# Current Spec");
     expect(specResult.implementationPlan).toBe("# Current Plan");
     expect(revisionRequest?.status).toBe("failed");
+  });
+
+  it("persists degraded spec-generation diagnostics on failed runs", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    seedApproachCheckpoint(repository);
+    const providers = createSpecGenerationProviders("always_fail");
+    const service = createSessionService({
+      repository,
+      gpt: providers.gpt,
+      claude: providers.claude
+    });
+
+    const started = await service.continueSession({
+      id: "sess_specgen",
+      humanResponse: "Proceed to spec generation"
+    });
+    expect(started?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, "sess_specgen");
+    const persistedFailure = repository.findPhaseResult("sess_specgen", "spec_generation_failure");
+    const current = await service.getSession("sess_specgen");
+    const exported = service.exportSession("sess_specgen");
+
+    expect(settled.session.phase).toBe("spec_generation");
+    expect(settled.session.status).toBe("errored");
+    expect(persistedFailure).toBeDefined();
+    expect(current?.phaseResult).toMatchObject({
+      phase: "spec_generation",
+      provider: "claude",
+      substep: "revision",
+      outputStatus: "degraded"
+    });
+    expect(exported?.phaseResults).toMatchObject({
+      spec_generation_failure: {
+        phase: "spec_generation",
+        provider: "claude",
+        substep: "revision",
+        outputStatus: "degraded"
+      }
+    });
+  });
+
+  it("clears stale spec-generation failure diagnostics after a successful retry", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    seedApproachCheckpoint(repository);
+    const providers = createSpecGenerationProviders("fail_once_then_succeed");
+    const service = createSessionService({
+      repository,
+      gpt: providers.gpt,
+      claude: providers.claude
+    });
+
+    await service.continueSession({
+      id: "sess_specgen",
+      humanResponse: "Proceed to spec generation"
+    });
+    const failed = await waitForSettledSession(service, "sess_specgen");
+    expect(failed.session.status).toBe("errored");
+    expect(repository.findPhaseResult("sess_specgen", "spec_generation_failure")).toBeDefined();
+
+    const retried = await service.continueSession({
+      id: "sess_specgen",
+      humanResponse: "Retry the failed spec generation"
+    });
+    expect(retried?.activeRun).toBeDefined();
+
+    const settled = await waitForSettledSession(service, "sess_specgen");
+    const currentSpec = repository.findPhaseResult("sess_specgen", "spec_generation");
+    const staleFailure = repository.findPhaseResult("sess_specgen", "spec_generation_failure");
+    const exported = service.exportSession("sess_specgen");
+
+    expect(settled.session.status).toBe("checkpoint");
+    expect(currentSpec).toBeDefined();
+    expect(JSON.parse(currentSpec!.resultJson)).toMatchObject({
+      spec: "Final revised spec",
+      implementationPlan: "Final revised plan"
+    });
+    expect(staleFailure).toBeUndefined();
+    expect(exported?.phaseResults).not.toHaveProperty("spec_generation_failure");
   });
 
   it("injects grounding context into the first prompt when configured", async () => {
@@ -490,6 +799,34 @@ describe("createSessionService", () => {
     expect(rewound!.session.phase).toBe("approach_debate");
     expect(["checkpoint", "waiting_for_human"]).toContain(rewound!.session.status);
     expect(repository.findPhaseResult(created.session.id, "spec_generation")).toBeUndefined();
+  });
+
+  it("removes stale spec-generation failure diagnostics when rewinding out of spec generation", async () => {
+    const repository = new SessionRepository(createInMemoryDatabase());
+    seedApproachCheckpoint(repository);
+    const providers = createSpecGenerationProviders("always_fail");
+    const service = createSessionService({
+      repository,
+      gpt: providers.gpt,
+      claude: providers.claude
+    });
+
+    await service.continueSession({
+      id: "sess_specgen",
+      humanResponse: "Proceed to spec generation"
+    });
+    const failed = await waitForSettledSession(service, "sess_specgen");
+    expect(failed.session.status).toBe("errored");
+    expect(repository.findPhaseResult("sess_specgen", "spec_generation_failure")).toBeDefined();
+
+    const rewound = await service.rewindSession("sess_specgen");
+    const exported = service.exportSession("sess_specgen");
+
+    expect(rewound).not.toBeNull();
+    expect(rewound!.session.phase).toBe("approach_debate");
+    expect(repository.findPhaseResult("sess_specgen", "spec_generation")).toBeUndefined();
+    expect(repository.findPhaseResult("sess_specgen", "spec_generation_failure")).toBeUndefined();
+    expect(exported?.phaseResults).not.toHaveProperty("spec_generation_failure");
   });
 
   it("marks a background run errored when post-processing fails", async () => {
