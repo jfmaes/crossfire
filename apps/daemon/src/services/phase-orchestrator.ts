@@ -1651,16 +1651,17 @@ function buildDocumentSectionTitleIndexBrief(input: {
 } {
   const sections = splitMarkdownIntoSections(input.text);
   const sectionTitles = sections.map((section) => section.title);
-  const totalOmittedChars = sections.reduce((sum, section) => sum + section.content.length, 0);
-  const sectionsWithTruncatedExcerpts = sections.map((section) => ({
-    title: section.title,
-    omittedChars: section.content.length
-  }));
+  const anchorIndices = pickSectionAnchorIndices(sections.length);
+  const anchorIndexSet = new Set(anchorIndices);
+  const sectionsWithTruncatedExcerpts: RevisionDocumentReferenceTrace["sectionsWithTruncatedExcerpts"] = [];
+  let totalExcerptChars = 0;
+  let totalOmittedChars = 0;
   const lines = [
     `# ${input.documentLabel} Authority Section Index`,
     "",
     "Every section title below is exact.",
-    "No verbatim body excerpts are retained in this soft-budget brief; omitted content is tracked explicitly in metadata."
+    "The exact body anchors below are verbatim excerpts from selected authoritative sections.",
+    "All remaining omitted content is tracked explicitly in metadata."
   ];
 
   if (sections.length === 0) {
@@ -1668,11 +1669,49 @@ function buildDocumentSectionTitleIndexBrief(input: {
   } else {
     lines.push("", "## Exact Section Titles", "");
     lines.push(...sectionTitles.map((title, index) => `${index + 1}. ${title}`));
+    lines.push("", "## Exact Body Anchors", "");
+
+    for (const anchorIndex of anchorIndices) {
+      const section = sections[anchorIndex];
+      if (!section) {
+        continue;
+      }
+
+      const bodyText = extractSectionBodyText(section.content);
+      const excerptSource = bodyText || section.content;
+      const excerpt = excerptSource.slice(0, 48).trimEnd();
+      const omittedChars = Math.max(0, excerptSource.length - excerpt.length);
+      totalExcerptChars += excerpt.length;
+      totalOmittedChars += omittedChars;
+
+      lines.push(`### Anchor ${anchorIndex + 1}: ${section.title}`);
+      lines.push(excerpt || "[No verbatim body content available for this section anchor.]");
+      if (omittedChars > 0) {
+        lines.push(`[Anchor excerpt truncated: ${omittedChars} chars omitted from this authoritative section.]`);
+      }
+      lines.push("");
+      sectionsWithTruncatedExcerpts.push({
+        title: section.title,
+        omittedChars
+      });
+    }
+  }
+
+  for (const [index, section] of sections.entries()) {
+    if (anchorIndexSet.has(index)) {
+      continue;
+    }
+
+    totalOmittedChars += extractSectionBodyText(section.content).length || section.content.length;
+    sectionsWithTruncatedExcerpts.push({
+      title: section.title,
+      omittedChars: extractSectionBodyText(section.content).length || section.content.length
+    });
   }
 
   lines.push(
     "",
-    `[${input.documentLabel} brief metadata: ${sections.length} exact section title reference(s), 0 verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
+    `[${input.documentLabel} brief metadata: ${sections.length} exact section title reference(s), ${totalExcerptChars} verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
   );
 
   return {
@@ -1682,7 +1721,7 @@ function buildDocumentSectionTitleIndexBrief(input: {
       referencedSections: sections.length,
       sectionTitles,
       sectionsWithTruncatedExcerpts,
-      totalExcerptChars: 0,
+      totalExcerptChars,
       totalOmittedChars
     }
   };
@@ -2117,10 +2156,16 @@ function verifySynthesizedGapCoverage(
 function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<number> {
   const covered = new Set<number>();
   const normalizedText = text.replace(/[–—]/g, "-");
+  const negativeCoverageCue = /\b(?:unresolved|remaining|pending|missing|omitted?|exclude[sd]?|deferred?|not\s+covered|not\s+addressed|not\s+fixed|still\s+open|follow-?up|separate\s+fix)\b/i;
 
   for (const match of normalizedText.matchAll(/\bgaps?\b\s*:?\s*([^\n.;]*)/gi)) {
-    const segment = match[1] ?? "";
-    for (const rangeMatch of segment.matchAll(/\b(\d+)\s*-\s*(\d+)\b/g)) {
+    const segment = (match[1] ?? "").trim();
+    const positiveSegment = stripNegativeCoverageTail(segment);
+    if (!positiveSegment || negativeCoverageCue.test(positiveSegment)) {
+      continue;
+    }
+
+    for (const rangeMatch of positiveSegment.matchAll(/\b(\d+)\s*-\s*(\d+)\b/g)) {
       const start = Number(rangeMatch[1]);
       const end = Number(rangeMatch[2]);
       if (!Number.isInteger(start) || !Number.isInteger(end)) {
@@ -2134,7 +2179,7 @@ function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<numbe
       }
     }
 
-    for (const singleMatch of segment.matchAll(/\b(\d+)\b/g)) {
+    for (const singleMatch of positiveSegment.matchAll(/\b(\d+)\b/g)) {
       const gapNumber = Number(singleMatch[1]);
       if (Number.isInteger(gapNumber) && gapNumber >= 1 && gapNumber <= maxGapNumber) {
         covered.add(gapNumber);
@@ -2143,6 +2188,38 @@ function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<numbe
   }
 
   return covered;
+}
+
+function extractSectionBodyText(sectionContent: string): string {
+  const lines = sectionContent.split("\n");
+  if (lines.length <= 1) {
+    return sectionContent.trim();
+  }
+
+  const firstLine = lines[0]?.trim() ?? "";
+  if (/^#{1,6}\s.+$/.test(firstLine)) {
+    return lines.slice(1).join("\n").trim();
+  }
+
+  return sectionContent.trim();
+}
+
+function pickSectionAnchorIndices(sectionCount: number): number[] {
+  if (sectionCount <= 0) {
+    return [];
+  }
+
+  const indices = new Set<number>([0, Math.floor((sectionCount - 1) / 2), sectionCount - 1]);
+  return [...indices].sort((a, b) => a - b);
+}
+
+function stripNegativeCoverageTail(segment: string): string {
+  const contrastMatch = segment.match(/\s*(?:,|\bbut\b|\bhowever\b|\bexcept\b|\bexcluding\b|\bother than\b|\byet\b|\bwhile\b|\balthough\b|\bthough\b)\s*/i);
+  if (!contrastMatch || contrastMatch.index === undefined) {
+    return segment;
+  }
+
+  return segment.slice(0, contrastMatch.index).trim();
 }
 
 function extractWalkthroughGaps(

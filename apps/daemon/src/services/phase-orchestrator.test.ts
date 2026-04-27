@@ -1684,8 +1684,9 @@ describe("createPhaseOrchestrator", () => {
       const revisionPrompt = claudePrompts.at(-1)!.prompt;
       expect(revisionPrompt).toContain("ADVERSARIAL WALKTHROUGH FINDINGS:");
       expect(revisionPrompt).toContain("# Specification Authority Section Index");
+      expect(revisionPrompt).toContain("## Exact Body Anchors");
       expect(revisionPrompt).not.toContain("# Specification Authority References");
-      expect(result.trace.revisionInputShaping.specReferenceTrace?.totalExcerptChars).toBe(0);
+      expect(result.trace.revisionInputShaping.specReferenceTrace?.totalExcerptChars).toBeGreaterThan(0);
     });
 
     it("synthesizes a gap-heavy revision input at the Claude soft budget even when the hard budget is not hit", async () => {
@@ -1835,7 +1836,7 @@ describe("createPhaseOrchestrator", () => {
       expect(revisionPrompt).toContain("RC-1 covers gaps: 1–18");
     });
 
-    it("fails closed when a synthesized gap brief omits original walkthrough gap coverage", async () => {
+    it("fails closed when a synthesized gap brief uses negative phrasing for an unresolved gap", async () => {
       const events: ProgressEvent[] = [];
       const unsubscribe = onProgress((event) => events.push(event));
       const gapHeavyGaps = Array.from({ length: 18 }, (_, index) => ({
@@ -1921,9 +1922,9 @@ describe("createPhaseOrchestrator", () => {
           if (input.phase === "gap_synthesis") {
             const synthesisTurn = {
               ...baseTurn,
-              rawText: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17 with ordered rollback and acceptance fixes.",
-              summary: "Soft-budget gap synthesis incomplete",
-              proposedSpecDelta: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17 with ordered rollback and acceptance fixes.",
+              rawText: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17, but gap 18 is still unresolved and needs a separate fix.",
+              summary: "Soft-budget gap synthesis left one gap unresolved",
+              proposedSpecDelta: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17, but gap 18 is still unresolved and needs a separate fix.",
               implementationPlan: ""
             };
             yield {
