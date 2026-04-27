@@ -77,17 +77,30 @@ interface WalkthroughGap {
   fix: string;
 }
 
+interface RevisionDocumentReferenceTrace {
+  totalSections: number;
+  referencedSections: number;
+  sectionTitles: string[];
+  sectionsWithTruncatedExcerpts: Array<{
+    title: string;
+    omittedChars: number;
+  }>;
+  totalExcerptChars: number;
+  totalOmittedChars: number;
+}
+
 interface RevisionInputShapingTrace {
   applied: boolean;
-  trigger: "none" | "soft_budget" | "hard_budget";
-  budgetChars: number | null;
   originalChars: number;
   finalChars: number;
-  gapReportSynthesized: boolean;
-  specCompacted: boolean;
-  planCompacted: boolean;
-  specSectionsCompacted: string[];
-  planSectionsCompacted: string[];
+  hardBudgetGapReportSynthesized: boolean;
+  softBudgetApplied: boolean;
+  softBudgetChars: number | null;
+  softBudgetGapReportSynthesized: boolean;
+  softBudgetCompactRevisionBriefApplied: boolean;
+  finalGapReportMode: "raw" | "synthesized";
+  specReferenceTrace: RevisionDocumentReferenceTrace | null;
+  planReferenceTrace: RevisionDocumentReferenceTrace | null;
 }
 
 interface SpecGenerationResult {
@@ -173,13 +186,6 @@ interface PromptLedgerEntry {
   viaConversationReuse: boolean;
 }
 
-interface CompactionMetadata {
-  component: string;
-  originalChars: number;
-  finalChars: number;
-  sectionsCompacted: string[];
-}
-
 interface TurnTrace {
   outputStatus: "ok" | "degraded" | "phase_invalid";
   missingFields: string[];
@@ -246,6 +252,8 @@ const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
 const CLAUDE_REVISION_SOFT_BUDGET_CHARS = 45_000;
+const SOFT_GAP_SYNTHESIS_TRIGGER_CHARS = 8_000;
+const SOFT_GAP_SYNTHESIS_TARGET_CHARS = 6_000;
 const RAW_RESPONSE_PREVIEW_MAX_CHARS = 1_200;
 const SPEC_GENERATION_RECOVERY_INSTRUCTION = [
   "Recovery retry: previous response was rejected because it was not a valid raw JSON object.",
@@ -914,8 +922,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           synthesized: false
         });
         revisionInputShaping = createRevisionInputShapingTrace(revisionPeerDraft.length);
-
-        if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
+        const synthesizeRevisionGapReport = async (targetChars: number, reason: "hard_budget" | "soft_budget") => {
           emitProgress({
             sessionId,
             runId,
@@ -925,19 +932,26 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               authorityInput: {
                 component: "revisionPeerDraft",
                 actualChars: revisionPeerDraft.length,
-                budgetChars: REVISION_INPUT_BUDGET_CHARS
+                budgetChars: reason === "hard_budget"
+                  ? REVISION_INPUT_BUDGET_CHARS
+                  : CLAUDE_REVISION_SOFT_BUDGET_CHARS
               },
               gapSynthesis: {
                 originalGapCount: allGaps.length,
-                originalChars: gapReport.length
+                originalChars: gapReport.length,
+                targetChars,
+                reason
               }
             },
-            message: `revision input exceeds ${REVISION_INPUT_BUDGET_CHARS} chars; synthesizing walkthrough gaps`
+            message: reason === "hard_budget"
+              ? `revision input exceeds ${REVISION_INPUT_BUDGET_CHARS} chars; synthesizing walkthrough gaps`
+              : `Claude revision input exceeds the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; synthesizing walkthrough gaps`
           });
 
           const synthesisPrompt = buildGapSynthesisPrompt({
             originalProblem: prompt,
-            gaps: allGaps
+            gaps: allGaps,
+            targetChars
           });
           const synthesisResult = await collectTurnOutput(input.claude, {
             sessionId,
@@ -959,14 +973,18 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             synthesized: true
           });
           revisionInputSynthesized = true;
-          revisionInputShaping = {
-            ...revisionInputShaping,
-            applied: true,
-            trigger: "hard_budget",
-            budgetChars: REVISION_INPUT_BUDGET_CHARS,
-            gapReportSynthesized: true,
-            finalChars: revisionPeerDraft.length
-          };
+
+          if (reason === "hard_budget") {
+            revisionInputShaping.hardBudgetGapReportSynthesized = true;
+          } else {
+            revisionInputShaping.softBudgetApplied = true;
+            revisionInputShaping.softBudgetChars = CLAUDE_REVISION_SOFT_BUDGET_CHARS;
+            revisionInputShaping.softBudgetGapReportSynthesized = true;
+          }
+
+          revisionInputShaping.applied = true;
+          revisionInputShaping.finalGapReportMode = "synthesized";
+          revisionInputShaping.finalChars = revisionPeerDraft.length;
 
           emitProgress({
             sessionId,
@@ -977,38 +995,47 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               gapSynthesis: {
                 originalGapCount: allGaps.length,
                 originalChars: gapReport.length,
-                finalChars: synthesizedGapReport.length
+                finalChars: synthesizedGapReport.length,
+                targetChars,
+                reason
               }
             },
             message: `Synthesized ${allGaps.length} walkthrough gap(s) into ${synthesizedGapReport.length} chars`
           });
+        };
+
+        if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
+          await synthesizeRevisionGapReport(12_000, "hard_budget");
         }
 
         if (revisionPeerDraft.length > CLAUDE_REVISION_SOFT_BUDGET_CHARS) {
-          const compactedRevisionInput = compactClaudeRevisionAuthorityDraft({
+          if (
+            !revisionInputShaping.softBudgetGapReportSynthesized
+            && revisionGapReport.length > SOFT_GAP_SYNTHESIS_TRIGGER_CHARS
+          ) {
+            await synthesizeRevisionGapReport(SOFT_GAP_SYNTHESIS_TARGET_CHARS, "soft_budget");
+          }
+        }
+
+        if (revisionPeerDraft.length > CLAUDE_REVISION_SOFT_BUDGET_CHARS) {
+          const compactedRevisionInput = buildSoftBudgetRevisionBrief({
             reviewedSpec,
             reviewedPlan,
             gapReport: revisionGapReport,
-            synthesized: revisionInputShaping.gapReportSynthesized,
-            budgetChars: CLAUDE_REVISION_SOFT_BUDGET_CHARS
+            synthesized: revisionInputShaping.finalGapReportMode === "synthesized",
+            targetChars: CLAUDE_REVISION_SOFT_BUDGET_CHARS
           });
 
           if (compactedRevisionInput.applied) {
             revisionPeerDraft = compactedRevisionInput.revisionPeerDraft;
             revisionInputSynthesized = true;
-            revisionInputShaping = {
-              ...revisionInputShaping,
-              applied: true,
-              trigger: revisionInputShaping.trigger === "hard_budget" ? "hard_budget" : "soft_budget",
-              budgetChars: revisionInputShaping.trigger === "hard_budget"
-                ? REVISION_INPUT_BUDGET_CHARS
-                : CLAUDE_REVISION_SOFT_BUDGET_CHARS,
-              finalChars: revisionPeerDraft.length,
-              specCompacted: compactedRevisionInput.specCompacted,
-              planCompacted: compactedRevisionInput.planCompacted,
-              specSectionsCompacted: compactedRevisionInput.specSectionsCompacted,
-              planSectionsCompacted: compactedRevisionInput.planSectionsCompacted
-            };
+            revisionInputShaping.applied = true;
+            revisionInputShaping.softBudgetApplied = true;
+            revisionInputShaping.softBudgetChars = CLAUDE_REVISION_SOFT_BUDGET_CHARS;
+            revisionInputShaping.softBudgetCompactRevisionBriefApplied = true;
+            revisionInputShaping.finalChars = revisionPeerDraft.length;
+            revisionInputShaping.specReferenceTrace = compactedRevisionInput.specReferenceTrace;
+            revisionInputShaping.planReferenceTrace = compactedRevisionInput.planReferenceTrace;
 
             emitProgress({
               sessionId,
@@ -1018,7 +1045,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               metadata: {
                 revisionInputShaping
               },
-              message: `Claude revision input exceeded the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; compacted authority-path drafts before revision`
+              message: `Claude revision input exceeded the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; replaced full drafts with an authority-safe revision brief`
             });
           }
         }
@@ -1064,11 +1091,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               return new Error(buildInvalidTurnOutputMessage(details));
             }
 
-            const outputStatus = details.outputStatus === "degraded"
-              ? "degraded"
-              : "phase_invalid";
             const diagnostics = buildSpecGenerationFailureDiagnostics({
-              outputStatus,
+              outputStatus: details.outputStatus as SpecGenerationFailureDiagnostics["outputStatus"],
               promptLedger: revisionPromptLedger,
               rawResponse: details.rawResponse || details.rawText,
               missingFields: details.missingFields,
@@ -1473,132 +1497,123 @@ function makePromptLedgerEntry(
 function createRevisionInputShapingTrace(originalChars = 0): RevisionInputShapingTrace {
   return {
     applied: false,
-    trigger: "none",
-    budgetChars: null,
     originalChars,
     finalChars: originalChars,
-    gapReportSynthesized: false,
-    specCompacted: false,
-    planCompacted: false,
-    specSectionsCompacted: [],
-    planSectionsCompacted: []
+    hardBudgetGapReportSynthesized: false,
+    softBudgetApplied: false,
+    softBudgetChars: null,
+    softBudgetGapReportSynthesized: false,
+    softBudgetCompactRevisionBriefApplied: false,
+    finalGapReportMode: "raw",
+    specReferenceTrace: null,
+    planReferenceTrace: null
   };
 }
 
-function emitCompactionProgress(input: {
-  sessionId: string;
-  runId?: string;
-  phase: PhaseValidationPhase;
-  component: string;
-  promptLedgerEntry: PromptLedgerEntry;
-  compaction: CompactionMetadata;
-  message: string;
-}) {
-  emitProgress({
-    sessionId: input.sessionId,
-    runId: input.runId,
-    type: "info",
-    phase: input.phase,
-    metadata: {
-      compacted: true,
-      component: input.component,
-      promptLedger: [input.promptLedgerEntry],
-      compaction: input.compaction
-    },
-    message: input.message
-  });
+function splitMarkdownIntoSections(text: string): Array<{ title: string; content: string }> {
+  const matches = Array.from(text.matchAll(/^#{1,6}\s.+$/gm));
+  if (matches.length === 0) {
+    const body = text.trim();
+    return body ? [{ title: "Document body", content: body }] : [];
+  }
+
+  const sections: Array<{ title: string; content: string }> = [];
+  const firstHeadingIndex = matches[0]?.index ?? 0;
+  if (firstHeadingIndex > 0) {
+    const preamble = text.slice(0, firstHeadingIndex).trim();
+    if (preamble) {
+      sections.push({ title: "Document preamble", content: preamble });
+    }
+  }
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const start = matches[index]?.index ?? 0;
+    const end = matches[index + 1]?.index ?? text.length;
+    const content = text.slice(start, end).trim();
+    if (!content) {
+      continue;
+    }
+
+    sections.push({
+      title: matches[index]?.[0].trim() ?? `Section ${index + 1}`,
+      content
+    });
+  }
+
+  return sections;
 }
 
-function compactMarkdown(text: string, budgetChars: number): {
+function buildDocumentReferenceBrief(input: {
+  documentLabel: "Specification" | "Implementation Plan";
   text: string;
-  compacted: boolean;
-  sectionsCompacted: string[];
+  excerptCharsPerSection: number;
+}): {
+  text: string;
+  trace: RevisionDocumentReferenceTrace;
 } {
-  if (text.length <= budgetChars) {
-    return { text, compacted: false, sectionsCompacted: [] };
-  }
+  const sections = splitMarkdownIntoSections(input.text);
+  const sectionTitles = sections.map((section) => section.title);
+  const sectionsWithTruncatedExcerpts: RevisionDocumentReferenceTrace["sectionsWithTruncatedExcerpts"] = [];
+  let totalExcerptChars = 0;
+  let totalOmittedChars = 0;
 
-  const keySectionPattern = /\b(tasks?|acceptance criteria|risks?|open questions?|dependencies)\b/i;
-  const sections = text.split(/(?=^#{1,2}\s)/m);
-  const sectionsCompacted: string[] = [];
-  const compactedSections = sections.map((section) => {
-    const lines = section.split("\n");
-    const header = lines[0] ?? "";
-    const bodyLines = lines.slice(1);
-    const isKeySection = keySectionPattern.test(header);
+  const lines = [
+    `# ${input.documentLabel} Authority References`,
+    "",
+    `Every section title below is exact. Each excerpt is verbatim from the authoritative reviewed draft.`
+  ];
 
-    if (isKeySection) {
-      sectionsCompacted.push(header || "unlabeled section");
-      const kept = bodyLines
-        .filter((line) => /^(\s*[-*]|\s*\d+\.)/.test(line) || line.trim() === "")
-        .map((line) => line.length > 160 ? `${line.slice(0, 157)}...` : line);
-      return [header, ...kept].join("\n").trim();
+  for (const [index, section] of sections.entries()) {
+    const excerpt = section.content.slice(0, input.excerptCharsPerSection).trimEnd();
+    const omittedChars = Math.max(0, section.content.length - excerpt.length);
+    totalExcerptChars += excerpt.length;
+    totalOmittedChars += omittedChars;
+
+    lines.push("", `## Ref ${index + 1}: ${section.title}`);
+    if (excerpt.length > 0) {
+      lines.push(excerpt);
+    } else {
+      lines.push("[No verbatim excerpt retained for this section in the soft-budget brief.]");
     }
 
-    const paragraphLines: string[] = [];
-    let inCodeBlock = false;
-    let codeBlock: string[] = [];
-
-    for (const line of bodyLines) {
-      if (line.trim().startsWith("```")) {
-        if (!inCodeBlock) {
-          inCodeBlock = true;
-          codeBlock = [line];
-          continue;
-        }
-        codeBlock.push(line);
-        if (codeBlock.length <= 22) {
-          paragraphLines.push(...codeBlock);
-        } else {
-          paragraphLines.push("[long code block omitted during compaction]");
-        }
-        break;
-      }
-
-      if (inCodeBlock) {
-        codeBlock.push(line);
-        continue;
-      }
-
-      if (paragraphLines.length > 0 && line.trim() === "") {
-        break;
-      }
-
-      if (paragraphLines.length > 0 || line.trim() !== "") {
-        paragraphLines.push(line);
-      }
+    if (omittedChars > 0) {
+      lines.push(`[Section excerpt truncated: ${omittedChars} chars omitted from this authoritative section.]`);
+      sectionsWithTruncatedExcerpts.push({
+        title: section.title,
+        omittedChars
+      });
     }
-
-    return [header, ...paragraphLines].join("\n").trim();
-  });
-
-  let compactedText = compactedSections.filter(Boolean).join("\n\n");
-  const footer = `\n\n[Compacted from ${text.length} chars to ${Math.min(compactedText.length, budgetChars)} chars. Lower-priority details omitted.]`;
-
-  if (compactedText.length + footer.length > budgetChars) {
-    compactedText = compactedText.slice(0, Math.max(0, budgetChars - footer.length - 3)).trimEnd() + "...";
   }
+
+  lines.push(
+    "",
+    `[${input.documentLabel} brief metadata: ${sections.length} section reference(s), ${totalExcerptChars} verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
+  );
 
   return {
-    text: `${compactedText}${footer}`,
-    compacted: true,
-    sectionsCompacted
+    text: lines.join("\n"),
+    trace: {
+      totalSections: sections.length,
+      referencedSections: sections.length,
+      sectionTitles,
+      sectionsWithTruncatedExcerpts,
+      totalExcerptChars,
+      totalOmittedChars
+    }
   };
 }
 
-function compactClaudeRevisionAuthorityDraft(input: {
+function buildSoftBudgetRevisionBrief(input: {
   reviewedSpec: string;
   reviewedPlan: string;
   gapReport: string;
   synthesized: boolean;
-  budgetChars: number;
+  targetChars: number;
 }): {
   revisionPeerDraft: string;
   applied: boolean;
-  specCompacted: boolean;
-  planCompacted: boolean;
-  specSectionsCompacted: string[];
-  planSectionsCompacted: string[];
+  specReferenceTrace: RevisionDocumentReferenceTrace;
+  planReferenceTrace: RevisionDocumentReferenceTrace;
 } {
   const originalRevisionPeerDraft = buildRevisionPeerDraft({
     reviewedSpec: input.reviewedSpec,
@@ -1607,64 +1622,79 @@ function compactClaudeRevisionAuthorityDraft(input: {
     synthesized: input.synthesized
   });
 
-  if (originalRevisionPeerDraft.length <= input.budgetChars) {
+  const originalSpecSections = splitMarkdownIntoSections(input.reviewedSpec);
+  const originalPlanSections = splitMarkdownIntoSections(input.reviewedPlan);
+  const fallbackSpecTrace: RevisionDocumentReferenceTrace = {
+    totalSections: originalSpecSections.length,
+    referencedSections: originalSpecSections.length,
+    sectionTitles: originalSpecSections.map((section) => section.title),
+    sectionsWithTruncatedExcerpts: [],
+    totalExcerptChars: input.reviewedSpec.length,
+    totalOmittedChars: 0
+  };
+  const fallbackPlanTrace: RevisionDocumentReferenceTrace = {
+    totalSections: originalPlanSections.length,
+    referencedSections: originalPlanSections.length,
+    sectionTitles: originalPlanSections.map((section) => section.title),
+    sectionsWithTruncatedExcerpts: [],
+    totalExcerptChars: input.reviewedPlan.length,
+    totalOmittedChars: 0
+  };
+
+  if (originalRevisionPeerDraft.length <= input.targetChars) {
     return {
       revisionPeerDraft: originalRevisionPeerDraft,
       applied: false,
-      specCompacted: false,
-      planCompacted: false,
-      specSectionsCompacted: [],
-      planSectionsCompacted: []
+      specReferenceTrace: fallbackSpecTrace,
+      planReferenceTrace: fallbackPlanTrace
     };
   }
 
-  const shellChars = buildRevisionPeerDraft({
-    reviewedSpec: "",
-    reviewedPlan: "",
-    gapReport: input.gapReport,
-    synthesized: input.synthesized
-  }).length;
-  const totalContentChars = Math.max(1, input.reviewedSpec.length + input.reviewedPlan.length);
-  const contentBudget = Math.max(4_000, input.budgetChars - shellChars);
+  const buildCandidate = (specExcerptChars: number, planExcerptChars: number) => {
+    const specBrief = buildDocumentReferenceBrief({
+      documentLabel: "Specification",
+      text: input.reviewedSpec,
+      excerptCharsPerSection: specExcerptChars
+    });
+    const planBrief = buildDocumentReferenceBrief({
+      documentLabel: "Implementation Plan",
+      text: input.reviewedPlan,
+      excerptCharsPerSection: planExcerptChars
+    });
 
-  let specBudget = Math.max(
-    2_000,
-    Math.floor(contentBudget * (input.reviewedSpec.length / totalContentChars))
-  );
-  let planBudget = Math.max(1_500, contentBudget - specBudget);
+    const requiredOutputSections = [
+      "# Required Output Sections",
+      "",
+      "Specification must preserve or update: Goal and non-goals, Architecture, Tech Stack, Key design decisions, Acceptance criteria, Risks and mitigations.",
+      "Implementation plan must preserve or update: Tasks, Tests-first guidance, Files to modify, Done-when criteria, Complexity estimates, Dependencies, Sprint groupings."
+    ].join("\n");
 
-  if (specBudget + planBudget > contentBudget) {
-    const overflow = specBudget + planBudget - contentBudget;
-    if (specBudget >= planBudget) {
-      specBudget = Math.max(2_000, specBudget - overflow);
-    } else {
-      planBudget = Math.max(1_500, planBudget - overflow);
-    }
-  }
-
-  const buildCandidate = (nextSpecBudget: number, nextPlanBudget: number) => {
-    const compactedSpec = compactMarkdown(input.reviewedSpec, nextSpecBudget);
-    const compactedPlan = compactMarkdown(input.reviewedPlan, nextPlanBudget);
+    const revisionPeerDraft = buildRevisionPeerDraft({
+      reviewedSpec: [
+        specBrief.text,
+        "",
+        requiredOutputSections
+      ].join("\n"),
+      reviewedPlan: planBrief.text,
+      gapReport: input.gapReport,
+      synthesized: input.synthesized
+    });
 
     return {
-      revisionPeerDraft: buildRevisionPeerDraft({
-        reviewedSpec: compactedSpec.text,
-        reviewedPlan: compactedPlan.text,
-        gapReport: input.gapReport,
-        synthesized: input.synthesized
-      }),
-      specCompacted: compactedSpec.compacted,
-      planCompacted: compactedPlan.compacted,
-      specSectionsCompacted: compactedSpec.sectionsCompacted,
-      planSectionsCompacted: compactedPlan.sectionsCompacted
+      revisionPeerDraft,
+      specReferenceTrace: specBrief.trace,
+      planReferenceTrace: planBrief.trace
     };
   };
 
-  let bestCandidate = buildCandidate(specBudget, planBudget);
-  for (let attempt = 0; attempt < 5 && bestCandidate.revisionPeerDraft.length > input.budgetChars; attempt += 1) {
-    specBudget = Math.max(1_500, Math.floor(specBudget * 0.85));
-    planBudget = Math.max(1_000, Math.floor(planBudget * 0.85));
-    const candidate = buildCandidate(specBudget, planBudget);
+  let specExcerptChars = 320;
+  let planExcerptChars = 240;
+  let bestCandidate = buildCandidate(specExcerptChars, planExcerptChars);
+
+  for (let attempt = 0; attempt < 6 && bestCandidate.revisionPeerDraft.length > input.targetChars; attempt += 1) {
+    specExcerptChars = Math.max(0, Math.floor(specExcerptChars * 0.6));
+    planExcerptChars = Math.max(0, Math.floor(planExcerptChars * 0.6));
+    const candidate = buildCandidate(specExcerptChars, planExcerptChars);
     if (candidate.revisionPeerDraft.length < bestCandidate.revisionPeerDraft.length) {
       bestCandidate = candidate;
     }
@@ -1672,7 +1702,7 @@ function compactClaudeRevisionAuthorityDraft(input: {
 
   return {
     ...bestCandidate,
-    applied: bestCandidate.specCompacted || bestCandidate.planCompacted
+    applied: true
   };
 }
 
@@ -1861,8 +1891,10 @@ function buildRevisionPeerDraft(input: {
 function buildGapSynthesisPrompt(input: {
   originalProblem: string;
   gaps: WalkthroughGap[];
+  targetChars?: number;
 }): string {
   const gapReport = formatWalkthroughGapReport(input.gaps);
+  const targetChars = input.targetChars ?? 12_000;
 
   return [
     "PHASE: WALKTHROUGH GAP SYNTHESIS",
@@ -1875,7 +1907,7 @@ function buildGapSynthesisPrompt(input: {
     "- Merge duplicates and symptoms that share the same root cause.",
     "- Keep concrete fixes, affected sections, acceptance criteria, ordering constraints, and failure/rollback behavior.",
     "- Do not include broad commentary, debate history, or generic advice.",
-    "- Target 12,000 characters or less unless preserving coverage requires slightly more.",
+    `- Target ${targetChars.toLocaleString()} characters or less unless preserving coverage requires slightly more.`,
     "",
     "Respond ONLY with a JSON object matching the normal Crossfire model-turn shape.",
     "Put the markdown repair brief in both rawText and proposedSpecDelta. Use neutral values for unrelated fields:",
