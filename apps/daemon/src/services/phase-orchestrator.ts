@@ -179,6 +179,11 @@ export interface SpecGenerationFailureDiagnostics {
   substep: "revision";
   outputStatus: "degraded";
   missingFields: string[];
+  degradedOutputRetry?: {
+    attempted: boolean;
+    reason: "degraded_structured_output";
+    succeeded: boolean;
+  };
   rawResponsePreview: string;
   promptLedgerSizes: {
     originalProblem: number;
@@ -993,7 +998,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               promptLedger: revisionPromptLedger,
               rawResponse: details.rawResponse || details.rawText,
               missingFields: details.missingFields,
-              revisionPeerDraftChars: revisionPeerDraft.length
+              revisionPeerDraftChars: revisionPeerDraft.length,
+              degradedOutputRetry
             });
 
             emitProgress({
@@ -1585,6 +1591,11 @@ function buildSpecGenerationFailureDiagnostics(input: {
   rawResponse: string;
   missingFields: string[];
   revisionPeerDraftChars: number;
+  degradedOutputRetry?: {
+    attempted: boolean;
+    reason: "degraded_structured_output" | null;
+    succeeded: boolean;
+  };
 }): SpecGenerationFailureDiagnostics {
   const promptLedgerSizes = summarizePromptLedgerSizes(input.promptLedger);
 
@@ -1594,6 +1605,15 @@ function buildSpecGenerationFailureDiagnostics(input: {
     substep: "revision",
     outputStatus: "degraded",
     missingFields: input.missingFields,
+    ...(input.degradedOutputRetry?.attempted
+      ? {
+          degradedOutputRetry: {
+            attempted: input.degradedOutputRetry.attempted,
+            reason: "degraded_structured_output" as const,
+            succeeded: input.degradedOutputRetry.succeeded
+          }
+        }
+      : {}),
     rawResponsePreview: capPreview(input.rawResponse, RAW_RESPONSE_PREVIEW_MAX_CHARS),
     promptLedgerSizes: {
       originalProblem: promptLedgerSizes.originalProblem,

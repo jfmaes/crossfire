@@ -1015,6 +1015,11 @@ describe("createPhaseOrchestrator", () => {
             phase?: string;
             provider?: string;
             substep?: string;
+            degradedOutputRetry?: {
+              attempted?: boolean;
+              reason?: string | null;
+              succeeded?: boolean;
+            };
             rawResponsePreview?: string;
             promptLedgerSizes?: Record<string, number>;
             revisionPeerDraftChars?: number;
@@ -1026,6 +1031,11 @@ describe("createPhaseOrchestrator", () => {
           phase: "spec_generation",
           provider: "claude",
           substep: "revision",
+          degradedOutputRetry: {
+            attempted: true,
+            reason: "degraded_structured_output",
+            succeeded: false
+          },
           rawResponsePreview: expect.stringContaining("Here is the JSON you requested:"),
           promptLedgerSizes: {
             originalProblem: originalProblem.length,
@@ -1036,16 +1046,22 @@ describe("createPhaseOrchestrator", () => {
           revisionPeerDraftChars: revisionPeerDraft.length
         });
 
-        const degradedRevisionEvent = events.find((event) =>
+        const degradedRevisionEvents = events.filter((event) =>
           event.phase === "spec_generation"
           && event.metadata?.substep === "revision"
           && event.metadata?.provider === "claude"
         );
+        const degradedRevisionEvent = degradedRevisionEvents.at(-1);
 
         expect(degradedRevisionEvent?.metadata).toMatchObject({
           phase: "spec_generation",
           provider: "claude",
           substep: "revision",
+          degradedOutputRetry: {
+            attempted: true,
+            reason: "degraded_structured_output",
+            succeeded: false
+          },
           rawResponsePreview: expect.stringContaining("Here is the JSON you requested:"),
           promptLedgerSizes: {
             originalProblem: originalProblem.length,
