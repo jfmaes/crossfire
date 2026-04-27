@@ -98,6 +98,7 @@ interface RevisionInputShapingTrace {
   softBudgetChars: number | null;
   softBudgetGapReportSynthesized: boolean;
   softBudgetCompactRevisionBriefApplied: boolean;
+  softBudgetSectionTitleIndexApplied: boolean;
   finalGapReportMode: "raw" | "synthesized";
   specReferenceTrace: RevisionDocumentReferenceTrace | null;
   planReferenceTrace: RevisionDocumentReferenceTrace | null;
@@ -1066,7 +1067,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             revisionInputShaping.applied = true;
             revisionInputShaping.softBudgetApplied = true;
             revisionInputShaping.softBudgetChars = CLAUDE_REVISION_SOFT_BUDGET_CHARS;
-            revisionInputShaping.softBudgetCompactRevisionBriefApplied = true;
+            revisionInputShaping.softBudgetCompactRevisionBriefApplied =
+              compactedRevisionInput.strategy === "section_reference_excerpt";
+            revisionInputShaping.softBudgetSectionTitleIndexApplied =
+              compactedRevisionInput.strategy === "section_title_index";
             revisionInputShaping.finalChars = revisionPeerDraft.length;
             revisionInputShaping.specReferenceTrace = compactedRevisionInput.specReferenceTrace;
             revisionInputShaping.planReferenceTrace = compactedRevisionInput.planReferenceTrace;
@@ -1538,6 +1542,7 @@ function createRevisionInputShapingTrace(originalChars = 0): RevisionInputShapin
     softBudgetChars: null,
     softBudgetGapReportSynthesized: false,
     softBudgetCompactRevisionBriefApplied: false,
+    softBudgetSectionTitleIndexApplied: false,
     finalGapReportMode: "raw",
     specReferenceTrace: null,
     planReferenceTrace: null
@@ -1637,6 +1642,52 @@ function buildDocumentReferenceBrief(input: {
   };
 }
 
+function buildDocumentSectionTitleIndexBrief(input: {
+  documentLabel: "Specification" | "Implementation Plan";
+  text: string;
+}): {
+  text: string;
+  trace: RevisionDocumentReferenceTrace;
+} {
+  const sections = splitMarkdownIntoSections(input.text);
+  const sectionTitles = sections.map((section) => section.title);
+  const totalOmittedChars = sections.reduce((sum, section) => sum + section.content.length, 0);
+  const sectionsWithTruncatedExcerpts = sections.map((section) => ({
+    title: section.title,
+    omittedChars: section.content.length
+  }));
+  const lines = [
+    `# ${input.documentLabel} Authority Section Index`,
+    "",
+    "Every section title below is exact.",
+    "No verbatim body excerpts are retained in this soft-budget brief; omitted content is tracked explicitly in metadata."
+  ];
+
+  if (sections.length === 0) {
+    lines.push("", "[No authored sections were detected in the authoritative draft.]");
+  } else {
+    lines.push("", "## Exact Section Titles", "");
+    lines.push(...sectionTitles.map((title, index) => `${index + 1}. ${title}`));
+  }
+
+  lines.push(
+    "",
+    `[${input.documentLabel} brief metadata: ${sections.length} exact section title reference(s), 0 verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
+  );
+
+  return {
+    text: lines.join("\n"),
+    trace: {
+      totalSections: sections.length,
+      referencedSections: sections.length,
+      sectionTitles,
+      sectionsWithTruncatedExcerpts,
+      totalExcerptChars: 0,
+      totalOmittedChars
+    }
+  };
+}
+
 function buildSoftBudgetRevisionBrief(input: {
   reviewedSpec: string;
   reviewedPlan: string;
@@ -1646,6 +1697,7 @@ function buildSoftBudgetRevisionBrief(input: {
 }): {
   revisionPeerDraft: string;
   applied: boolean;
+  strategy: "section_reference_excerpt" | "section_title_index" | null;
   specReferenceTrace: RevisionDocumentReferenceTrace;
   planReferenceTrace: RevisionDocumentReferenceTrace;
 } {
@@ -1679,10 +1731,18 @@ function buildSoftBudgetRevisionBrief(input: {
     return {
       revisionPeerDraft: originalRevisionPeerDraft,
       applied: false,
+      strategy: null,
       specReferenceTrace: fallbackSpecTrace,
       planReferenceTrace: fallbackPlanTrace
     };
   }
+
+  const requiredOutputSections = [
+    "# Required Output Sections",
+    "",
+    "Specification must preserve or update: Goal and non-goals, Architecture, Tech Stack, Key design decisions, Acceptance criteria, Risks and mitigations.",
+    "Implementation plan must preserve or update: Tasks, Tests-first guidance, Files to modify, Done-when criteria, Complexity estimates, Dependencies, Sprint groupings."
+  ].join("\n");
 
   const buildCandidate = (specExcerptChars: number, planExcerptChars: number) => {
     const specBrief = buildDocumentReferenceBrief({
@@ -1695,13 +1755,6 @@ function buildSoftBudgetRevisionBrief(input: {
       text: input.reviewedPlan,
       excerptCharsPerSection: planExcerptChars
     });
-
-    const requiredOutputSections = [
-      "# Required Output Sections",
-      "",
-      "Specification must preserve or update: Goal and non-goals, Architecture, Tech Stack, Key design decisions, Acceptance criteria, Risks and mitigations.",
-      "Implementation plan must preserve or update: Tasks, Tests-first guidance, Files to modify, Done-when criteria, Complexity estimates, Dependencies, Sprint groupings."
-    ].join("\n");
 
     const revisionPeerDraft = buildRevisionPeerDraft({
       reviewedSpec: [
@@ -1716,27 +1769,69 @@ function buildSoftBudgetRevisionBrief(input: {
 
     return {
       revisionPeerDraft,
+      strategy: "section_reference_excerpt" as const,
       specReferenceTrace: specBrief.trace,
       planReferenceTrace: planBrief.trace
     };
   };
 
+  const buildSectionTitleIndexCandidate = () => {
+    const specIndex = buildDocumentSectionTitleIndexBrief({
+      documentLabel: "Specification",
+      text: input.reviewedSpec
+    });
+    const planIndex = buildDocumentSectionTitleIndexBrief({
+      documentLabel: "Implementation Plan",
+      text: input.reviewedPlan
+    });
+
+    const revisionPeerDraft = buildRevisionPeerDraft({
+      reviewedSpec: [
+        specIndex.text,
+        "",
+        requiredOutputSections
+      ].join("\n"),
+      reviewedPlan: planIndex.text,
+      gapReport: input.gapReport,
+      synthesized: input.synthesized
+    });
+
+    return {
+      revisionPeerDraft,
+      strategy: "section_title_index" as const,
+      specReferenceTrace: specIndex.trace,
+      planReferenceTrace: planIndex.trace
+    };
+  };
+
   let specExcerptChars = 320;
   let planExcerptChars = 240;
-  let bestCandidate = buildCandidate(specExcerptChars, planExcerptChars);
+  let bestExcerptCandidate = buildCandidate(specExcerptChars, planExcerptChars);
 
-  for (let attempt = 0; attempt < 6 && bestCandidate.revisionPeerDraft.length > input.targetChars; attempt += 1) {
+  for (let attempt = 0; attempt < 6 && bestExcerptCandidate.revisionPeerDraft.length > input.targetChars; attempt += 1) {
     specExcerptChars = Math.max(0, Math.floor(specExcerptChars * 0.6));
     planExcerptChars = Math.max(0, Math.floor(planExcerptChars * 0.6));
     const candidate = buildCandidate(specExcerptChars, planExcerptChars);
-    if (candidate.revisionPeerDraft.length < bestCandidate.revisionPeerDraft.length) {
-      bestCandidate = candidate;
+    if (candidate.revisionPeerDraft.length < bestExcerptCandidate.revisionPeerDraft.length) {
+      bestExcerptCandidate = candidate;
     }
   }
 
+  const sectionTitleIndexCandidate = buildSectionTitleIndexCandidate();
+  const excerptShrankOriginal = bestExcerptCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length;
+  const excerptFitsTarget = bestExcerptCandidate.revisionPeerDraft.length <= input.targetChars;
+  const indexShrankOriginal = sectionTitleIndexCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length;
+  const indexFitsTarget = sectionTitleIndexCandidate.revisionPeerDraft.length <= input.targetChars;
+
+  const selectedCandidate =
+    excerptShrankOriginal && excerptFitsTarget ? bestExcerptCandidate
+    : indexShrankOriginal && indexFitsTarget ? sectionTitleIndexCandidate
+    : excerptShrankOriginal ? bestExcerptCandidate
+    : sectionTitleIndexCandidate;
+
   return {
-    ...bestCandidate,
-    applied: bestCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length
+    ...selectedCandidate,
+    applied: true
   };
 }
 

@@ -1555,8 +1555,8 @@ describe("createPhaseOrchestrator", () => {
       );
     });
 
-    it("does not replace the original revisionPeerDraft when the soft-budget brief would be larger", async () => {
-      const reviewedSpec = Array.from({ length: 2_400 }, (_, index) =>
+    it("still shapes the final Claude revision input when the first soft-budget brief strategy would be larger", async () => {
+      const reviewedSpec = Array.from({ length: 3_000 }, (_, index) =>
         `## S${index + 1}\nTiny.`
       ).join("\n\n");
       const reviewedPlan = "# Reviewed Plan\n\n1. Short plan.";
@@ -1673,15 +1673,19 @@ describe("createPhaseOrchestrator", () => {
       );
 
       expect(result.spec).toBe("Final revised spec");
-      expect(result.trace.revisionInputSynthesized).toBe(false);
+      expect(result.trace.revisionInputSynthesized).toBe(true);
       expect(result.trace.revisionInputShaping).toMatchObject({
-        applied: false,
-        softBudgetApplied: false,
-        softBudgetCompactRevisionBriefApplied: false
+        applied: true,
+        softBudgetApplied: true,
+        softBudgetCompactRevisionBriefApplied: false,
+        softBudgetSectionTitleIndexApplied: true,
+        finalGapReportMode: "raw"
       });
       const revisionPrompt = claudePrompts.at(-1)!.prompt;
       expect(revisionPrompt).toContain("ADVERSARIAL WALKTHROUGH FINDINGS:");
+      expect(revisionPrompt).toContain("# Specification Authority Section Index");
       expect(revisionPrompt).not.toContain("# Specification Authority References");
+      expect(result.trace.revisionInputShaping.specReferenceTrace?.totalExcerptChars).toBe(0);
     });
 
     it("synthesizes a gap-heavy revision input at the Claude soft budget even when the hard budget is not hit", async () => {
