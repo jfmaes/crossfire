@@ -60,7 +60,9 @@ export class ClaudeAdapter implements ProviderAdapter {
         this.cliSessions.set(debateKey, event.cliSessionId);
       }
 
-      const turn = parseStructuredTurn("claude", event.text);
+      const turn = parseStructuredTurn("claude", event.text, {
+        requireExactJsonObject: input.phase === "spec_generation"
+      });
       if (turn.degraded) {
         const providerFailure = detectProviderFailureText(event.text);
         if (providerFailure) {
