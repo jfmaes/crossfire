@@ -248,6 +248,16 @@ class AuthorityInputTooLargeError extends Error {
   }
 }
 
+class GapSynthesisCoverageError extends Error {
+  constructor(
+    public readonly missingGapNumbers: number[],
+    public readonly synthesizedGapReport: string
+  ) {
+    super(`gap_synthesis_coverage_incomplete: missing original gap coverage for ${missingGapNumbers.join(", ")}`);
+    this.name = "GapSynthesisCoverageError";
+  }
+}
+
 const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
@@ -965,6 +975,30 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           });
           gapSynthesisTrace = synthesisResult.trace;
           const synthesizedGapReport = extractGapSynthesisBrief(synthesisResult, gapReport);
+          const coverageCheck = verifySynthesizedGapCoverage(synthesizedGapReport, allGaps.length);
+          if (!coverageCheck.complete) {
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              phase: "gap_synthesis",
+              metadata: {
+                blockedReason: "gap_synthesis_coverage_incomplete",
+                gapSynthesis: {
+                  reason,
+                  originalGapCount: allGaps.length,
+                  coveredGapCount: coverageCheck.coveredGapNumbers.length,
+                  missingGapNumbers: coverageCheck.missingGapNumbers
+                }
+              },
+              message: `Synthesized walkthrough gap brief omitted coverage for ${coverageCheck.missingGapNumbers.length} original gap(s)`
+            });
+
+            throw new GapSynthesisCoverageError(
+              coverageCheck.missingGapNumbers,
+              synthesizedGapReport
+            );
+          }
           revisionGapReport = synthesizedGapReport;
           revisionPeerDraft = buildRevisionPeerDraft({
             reviewedSpec,
@@ -1960,6 +1994,59 @@ function extractGapSynthesisBrief(
   }
 
   return fallback;
+}
+
+function verifySynthesizedGapCoverage(
+  synthesizedGapReport: string,
+  originalGapCount: number
+): {
+  complete: boolean;
+  coveredGapNumbers: number[];
+  missingGapNumbers: number[];
+} {
+  const covered = extractCoveredGapNumbers(synthesizedGapReport, originalGapCount);
+  const missingGapNumbers: number[] = [];
+  for (let gapNumber = 1; gapNumber <= originalGapCount; gapNumber += 1) {
+    if (!covered.has(gapNumber)) {
+      missingGapNumbers.push(gapNumber);
+    }
+  }
+
+  return {
+    complete: missingGapNumbers.length === 0,
+    coveredGapNumbers: [...covered].sort((a, b) => a - b),
+    missingGapNumbers
+  };
+}
+
+function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<number> {
+  const covered = new Set<number>();
+
+  for (const match of text.matchAll(/\bgaps?\b([^\n.;:]*)/gi)) {
+    const segment = match[1] ?? "";
+    for (const rangeMatch of segment.matchAll(/\b(\d+)\s*-\s*(\d+)\b/g)) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) {
+        continue;
+      }
+
+      const lower = Math.max(1, Math.min(start, end));
+      const upper = Math.min(maxGapNumber, Math.max(start, end));
+      for (let gapNumber = lower; gapNumber <= upper; gapNumber += 1) {
+        covered.add(gapNumber);
+      }
+    }
+
+    for (const singleMatch of segment.matchAll(/\b(\d+)\b/g)) {
+      const gapNumber = Number(singleMatch[1]);
+      if (Number.isInteger(gapNumber) && gapNumber >= 1 && gapNumber <= maxGapNumber) {
+        covered.add(gapNumber);
+      }
+    }
+  }
+
+  return covered;
 }
 
 function extractWalkthroughGaps(

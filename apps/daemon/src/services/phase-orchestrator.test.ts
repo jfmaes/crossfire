@@ -1702,6 +1702,164 @@ describe("createPhaseOrchestrator", () => {
       expect(revisionPrompt).toContain("RC-1 covers gaps 1-18");
     });
 
+    it("fails closed when a synthesized gap brief omits original walkthrough gap coverage", async () => {
+      const events: ProgressEvent[] = [];
+      const unsubscribe = onProgress((event) => events.push(event));
+      const gapHeavyGaps = Array.from({ length: 18 }, (_, index) => ({
+        location: `Section ${index + 1}`,
+        issue: `Gap ${index + 1}: ${"operational detail missing ".repeat(90)}`,
+        fix: `Fix ${index + 1}: ${"add exact rollback and acceptance criteria ".repeat(70)}`
+      }));
+      const claudePrompts: Array<{ phase?: string; prompt: string }> = [];
+
+      const gpt: ProviderAdapter = {
+        name: "gpt",
+        async *sendTurn(input: ProviderTurnInput) {
+          const isWalkthrough = input.phase === "walkthrough";
+          const turn: ModelTurn = {
+            actor: "gpt",
+            rawText: isWalkthrough ? "GPT found many walkthrough gaps" : "GPT draft",
+            summary: isWalkthrough ? "GPT walkthrough" : "GPT draft summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: isWalkthrough ? "" : "Small draft spec",
+            milestoneReached: isWalkthrough ? null : "implementation_plan_ready",
+            implementationPlan: isWalkthrough ? null : "Small draft plan",
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: isWalkthrough ? gapHeavyGaps : null,
+            degraded: false
+          };
+          yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const claude: ProviderAdapter = {
+        name: "claude",
+        async *sendTurn(input: ProviderTurnInput) {
+          claudePrompts.push({ phase: input.phase, prompt: input.prompt });
+          const baseTurn: ModelTurn = {
+            actor: "claude",
+            rawText: "Claude output",
+            summary: "Claude summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: "",
+            milestoneReached: "implementation_plan_ready",
+            implementationPlan: null,
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: null,
+            degraded: false
+          };
+
+          if (input.phase === "walkthrough") {
+            const walkthroughTurn = {
+              ...baseTurn,
+              rawText: "Claude found no additional gaps",
+              summary: "Claude walkthrough",
+              milestoneReached: null,
+              walkthroughGaps: []
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: walkthroughTurn,
+              rawResponse: JSON.stringify(walkthroughTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          if (input.phase === "gap_synthesis") {
+            const synthesisTurn = {
+              ...baseTurn,
+              rawText: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17 with ordered rollback and acceptance fixes.",
+              summary: "Soft-budget gap synthesis incomplete",
+              proposedSpecDelta: "## Incomplete Repair Brief\n\n- RC-1 covers gaps 1-17 with ordered rollback and acceptance fixes.",
+              implementationPlan: ""
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: synthesisTurn,
+              rawResponse: JSON.stringify(synthesisTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          if (input.prompt.includes("SYNTHESIZED WALKTHROUGH REPAIR BRIEF")) {
+            throw new Error("final revision should not be called after incomplete gap synthesis");
+          }
+
+          const reviewTurn = {
+            ...baseTurn,
+            rawText: "Reviewed spec",
+            summary: "Review complete",
+            proposedSpecDelta: "# Reviewed Spec",
+            implementationPlan: "# Reviewed Plan"
+          };
+          yield {
+            type: "structured_turn",
+            actor: "claude",
+            turn: reviewTurn,
+            rawResponse: JSON.stringify(reviewTurn)
+          } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      try {
+        await expect(
+          createPhaseOrchestrator({ gpt, claude }).runSpecGeneration(
+            "s1",
+            "Design a task manager",
+            [{ question: "Scope?", answer: "Web only" }],
+            "Use React + Node"
+          )
+        ).rejects.toThrow("gap_synthesis_coverage_incomplete");
+      } finally {
+        unsubscribe();
+      }
+
+      expect(
+        claudePrompts.some((entry) =>
+          entry.phase === "spec_generation" && entry.prompt.includes("SYNTHESIZED WALKTHROUGH REPAIR BRIEF")
+        )
+      ).toBe(false);
+      const blockedEvent = events.find((event) =>
+        event.phase === "gap_synthesis"
+        && event.metadata?.blockedReason === "gap_synthesis_coverage_incomplete"
+      );
+      expect(blockedEvent?.metadata).toMatchObject({
+        blockedReason: "gap_synthesis_coverage_incomplete",
+        gapSynthesis: {
+          originalGapCount: 18,
+          coveredGapCount: 17,
+          missingGapNumbers: [18],
+          reason: "soft_budget"
+        }
+      });
+    });
+
     it("synthesizes walkthrough gaps when only the raw revision input exceeds budget", async () => {
       const reviewedSpec = `# Reviewed Spec\n\n${"Detailed requirement.\n".repeat(9_000)}`;
       const reviewedPlan = `# Reviewed Plan\n\n${"Implementation step.\n".repeat(300)}`;
