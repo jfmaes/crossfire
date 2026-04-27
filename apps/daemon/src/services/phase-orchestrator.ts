@@ -177,7 +177,7 @@ export interface SpecGenerationFailureDiagnostics {
   phase: "spec_generation";
   provider: "claude";
   substep: "revision";
-  outputStatus: "degraded";
+  outputStatus: "degraded" | "phase_invalid";
   missingFields: string[];
   degradedOutputRetry?: {
     attempted: boolean;
@@ -990,11 +990,16 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           phase: "spec_generation",
           promptLedger: revisionPromptLedger,
           invalidOutputErrorFactory: (details) => {
-            if (details.outputStatus !== "degraded") {
+            const shouldAttachDiagnostics =
+              details.outputStatus === "degraded"
+              || (details.outputStatus === "phase_invalid" && degradedOutputRetry.attempted);
+
+            if (!shouldAttachDiagnostics) {
               return new Error(buildInvalidTurnOutputMessage(details));
             }
 
             const diagnostics = buildSpecGenerationFailureDiagnostics({
+              outputStatus: details.outputStatus,
               promptLedger: revisionPromptLedger,
               rawResponse: details.rawResponse || details.rawText,
               missingFields: details.missingFields,
@@ -1009,7 +1014,9 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               model: "claude",
               phase: "spec_generation",
               metadata: diagnostics as Record<string, unknown>,
-              message: "Claude spec revision returned degraded structured output"
+              message: details.outputStatus === "degraded"
+                ? "Claude spec revision returned degraded structured output"
+                : "Claude spec revision retry returned phase-invalid structured output"
             });
 
             return new SpecGenerationDiagnosticsError(
@@ -1587,6 +1594,7 @@ function buildInvalidTurnOutputMessage(details: InvalidTurnOutputDetails): strin
 }
 
 function buildSpecGenerationFailureDiagnostics(input: {
+  outputStatus: SpecGenerationFailureDiagnostics["outputStatus"];
   promptLedger: PromptLedgerEntry[];
   rawResponse: string;
   missingFields: string[];
@@ -1603,7 +1611,7 @@ function buildSpecGenerationFailureDiagnostics(input: {
     phase: "spec_generation",
     provider: "claude",
     substep: "revision",
-    outputStatus: "degraded",
+    outputStatus: input.outputStatus,
     missingFields: input.missingFields,
     ...(input.degradedOutputRetry?.attempted
       ? {
