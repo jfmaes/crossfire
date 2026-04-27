@@ -103,6 +103,11 @@ interface SpecGenerationResult {
     usedCanonicalApproachHandoff: boolean;
     authorityPathUncompressed: boolean;
     authorityPathUncompacted: boolean;
+    degradedOutputRetry: {
+      attempted: boolean;
+      reason: "degraded_structured_output" | null;
+      succeeded: boolean;
+    };
     compaction: {
       approachResult: boolean;
       peerDraft: boolean;
@@ -222,6 +227,11 @@ const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
 const RAW_RESPONSE_PREVIEW_MAX_CHARS = 1_200;
+const SPEC_GENERATION_RECOVERY_INSTRUCTION = [
+  "Recovery retry: previous response was rejected because it was not a valid raw JSON object.",
+  "do not explain.",
+  "output one raw JSON object only."
+].join("\n");
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
   // Try direct parse first
@@ -865,6 +875,11 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       let revisionTrace: TurnTrace | undefined;
       let gapSynthesisTrace: TurnTrace | undefined;
       let revisionInputSynthesized = false;
+      const degradedOutputRetry: SpecGenerationResult["trace"]["degradedOutputRetry"] = {
+        attempted: false,
+        reason: null,
+        succeeded: false
+      };
 
       if (allGaps.length > 0) {
         emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
@@ -963,10 +978,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           revisionPeerDraftLedgerEntry
         ];
 
-        const revisionResult = await collectTurnOutput(input.claude, {
+        const collectRevisionResult = (revisionAttemptPrompt: string) => collectTurnOutput(input.claude, {
           sessionId,
           runId,
-          prompt: revisionPrompt,
+          prompt: revisionAttemptPrompt,
           phase: "spec_generation",
           promptLedger: revisionPromptLedger,
           invalidOutputErrorFactory: (details) => {
@@ -997,6 +1012,36 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             );
           }
         });
+
+        let revisionResult;
+        try {
+          revisionResult = await collectRevisionResult(revisionPrompt);
+        } catch (error) {
+          if (!isSpecGenerationDiagnosticsError(error)) {
+            throw error;
+          }
+
+          degradedOutputRetry.attempted = true;
+          degradedOutputRetry.reason = "degraded_structured_output";
+
+          emitProgress({
+            sessionId,
+            runId,
+            type: "info",
+            model: "claude",
+            phase: "spec_generation",
+            metadata: {
+              retryAttempted: true,
+              retryReason: degradedOutputRetry.reason
+            },
+            message: "Retrying Claude spec revision once with fresh recovery instructions"
+          });
+
+          revisionResult = await collectRevisionResult(
+            buildSpecGenerationRecoveryPrompt(revisionPrompt)
+          );
+          degradedOutputRetry.succeeded = true;
+        }
         revisionTrace = revisionResult.trace;
 
         finalSpec =
@@ -1040,6 +1085,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           usedCanonicalApproachHandoff: true,
           authorityPathUncompressed: true,
           authorityPathUncompacted: true,
+          degradedOutputRetry,
           compaction: {
             approachResult: false,
             peerDraft: false,
@@ -1572,6 +1618,10 @@ function capPreview(text: string, maxChars: number): string {
   }
 
   return `${text.slice(0, maxChars - 1)}…`;
+}
+
+function buildSpecGenerationRecoveryPrompt(prompt: string): string {
+  return `${SPEC_GENERATION_RECOVERY_INSTRUCTION}\n\n${prompt}`;
 }
 
 function buildRevisionPeerDraft(input: {
