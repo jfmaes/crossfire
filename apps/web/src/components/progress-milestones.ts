@@ -18,15 +18,51 @@ export function formatElapsed(ms?: number | null): string | null {
   return minutes === 0 ? `${seconds}s` : `${minutes}m ${seconds}s`;
 }
 
-export function isMaterialMilestone(event: Pick<SessionRunEvent, "type">): boolean {
+function isMaterialInfoEvent(
+  event: Pick<SessionRunEvent, "message" | "phase" | "metadata">
+): boolean {
+  if (event.phase === "gap_synthesis") {
+    return false;
+  }
+
+  if (
+    event.message.startsWith("Debate:") ||
+    event.message.startsWith("Debate stopped") ||
+    event.message.startsWith("Debate finished") ||
+    event.message.startsWith("Adversarial Walkthrough") ||
+    event.message.includes("operational gap(s) found")
+  ) {
+    return true;
+  }
+
+  const blockedReason = event.metadata?.blockedReason;
+  if (
+    blockedReason === "spec_generation_input_too_large" ||
+    blockedReason === "revision_input_too_large" ||
+    blockedReason === "feedback_input_too_large"
+  ) {
+    return true;
+  }
+
+  return event.metadata?.outputStatus === "degraded" ||
+    event.metadata?.outputStatus === "phase_invalid" ||
+    event.metadata?.outputStatus === "provider_error" ||
+    event.metadata?.retryAttempted === true;
+}
+
+export function isMaterialMilestone(
+  event: Pick<SessionRunEvent, "type" | "message" | "phase" | "metadata">
+): boolean {
   return event.type === "phase_start" ||
     event.type === "model_start" ||
     event.type === "model_done" ||
     event.type === "consensus" ||
-    event.type === "info";
+    (event.type === "info" && isMaterialInfoEvent(event));
 }
 
 function formatModel(value: string): string {
+  if (value === "gpt") return "GPT";
+  if (value === "claude") return "Claude";
   return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
@@ -35,7 +71,7 @@ function formatPhase(value: string): string {
 }
 
 export function milestoneText(
-  event: Pick<SessionRunEvent, "type" | "model" | "phase" | "message" | "elapsedMs">
+  event: Pick<SessionRunEvent, "type" | "model" | "phase" | "turnNumber" | "message" | "elapsedMs">
 ): string {
   if (event.type === "model_done" && event.model && event.phase) {
     const elapsed = formatElapsed(event.elapsedMs);
@@ -44,6 +80,15 @@ export function milestoneText(
 
   if (event.type === "model_start" && event.model && event.phase) {
     return `${formatModel(event.model)} started ${formatPhase(event.phase)}`;
+  }
+
+  if (event.type === "model_done" && event.model && typeof event.turnNumber === "number") {
+    const elapsed = formatElapsed(event.elapsedMs);
+    return `${formatModel(event.model)} finished debate turn ${event.turnNumber}${elapsed ? ` in ${elapsed}` : ""}`;
+  }
+
+  if (event.type === "model_start" && event.model && typeof event.turnNumber === "number") {
+    return `${formatModel(event.model)} started debate turn ${event.turnNumber}`;
   }
 
   return event.message;

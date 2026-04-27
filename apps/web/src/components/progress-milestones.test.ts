@@ -61,4 +61,52 @@ describe("deriveMilestones", () => {
 
     expect(milestones).toEqual([]);
   });
+
+  it("formats debate turn milestones without requiring a phase", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "model_start",
+        model: "gpt",
+        turnNumber: 1,
+        message: "Turn 1..."
+      }),
+      makeEvent({
+        id: "evt_2",
+        type: "model_done",
+        model: "gpt",
+        turnNumber: 1,
+        elapsedMs: 42500,
+        message: "Turn 1 done in 42.5s - 0 disagreements",
+        createdAt: "2026-04-27T17:29:16.000Z"
+      })
+    ]);
+
+    expect(milestones.map((milestone) => milestone.text)).toEqual([
+      "GPT started debate turn 1",
+      "GPT finished debate turn 1 in 42s"
+    ]);
+  });
+
+  it("excludes non-material info events by default", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "info",
+        phase: "gap_synthesis",
+        message: "Synthesized 4 walkthrough gap(s) into 6210 chars"
+      }),
+      makeEvent({
+        id: "evt_2",
+        type: "info",
+        phase: "spec_generation",
+        message: "Adversarial Walkthrough (both models simulate execution in parallel)",
+        createdAt: "2026-04-27T17:30:00.000Z"
+      })
+    ]);
+
+    expect(milestones.map((milestone) => milestone.text)).toEqual([
+      "Adversarial Walkthrough (both models simulate execution in parallel)"
+    ]);
+  });
 });
