@@ -1736,7 +1736,7 @@ function buildSoftBudgetRevisionBrief(input: {
 
   return {
     ...bestCandidate,
-    applied: true
+    applied: bestCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length
   };
 }
 
@@ -2021,8 +2021,9 @@ function verifySynthesizedGapCoverage(
 
 function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<number> {
   const covered = new Set<number>();
+  const normalizedText = text.replace(/[–—]/g, "-");
 
-  for (const match of text.matchAll(/\bgaps?\b([^\n.;:]*)/gi)) {
+  for (const match of normalizedText.matchAll(/\bgaps?\b\s*:?\s*([^\n.;]*)/gi)) {
     const segment = match[1] ?? "";
     for (const rangeMatch of segment.matchAll(/\b(\d+)\s*-\s*(\d+)\b/g)) {
       const start = Number(rangeMatch[1]);

@@ -1555,6 +1555,135 @@ describe("createPhaseOrchestrator", () => {
       );
     });
 
+    it("does not replace the original revisionPeerDraft when the soft-budget brief would be larger", async () => {
+      const reviewedSpec = Array.from({ length: 2_400 }, (_, index) =>
+        `## S${index + 1}\nTiny.`
+      ).join("\n\n");
+      const reviewedPlan = "# Reviewed Plan\n\n1. Short plan.";
+      const claudePrompts: Array<{ phase?: string; prompt: string }> = [];
+
+      const gpt: ProviderAdapter = {
+        name: "gpt",
+        async *sendTurn(input: ProviderTurnInput) {
+          const isWalkthrough = input.phase === "walkthrough";
+          const turn: ModelTurn = {
+            actor: "gpt",
+            rawText: isWalkthrough ? "GPT found one operational gap" : "GPT draft",
+            summary: isWalkthrough ? "GPT walkthrough" : "GPT draft summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: isWalkthrough ? "" : "Small draft spec",
+            milestoneReached: isWalkthrough ? null : "implementation_plan_ready",
+            implementationPlan: isWalkthrough ? null : "Small draft plan",
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: isWalkthrough
+              ? [{ location: "Section 2", issue: "Missing rollback behavior", fix: "Add rollback steps" }]
+              : null,
+            degraded: false
+          };
+          yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const claude: ProviderAdapter = {
+        name: "claude",
+        async *sendTurn(input: ProviderTurnInput) {
+          claudePrompts.push({ phase: input.phase, prompt: input.prompt });
+
+          if (input.phase === "walkthrough") {
+            const walkthroughTurn: ModelTurn = {
+              actor: "claude",
+              rawText: "Claude found no additional gaps",
+              summary: "Claude walkthrough",
+              newInsights: [],
+              assumptions: [],
+              disagreements: [],
+              questionsForPeer: [],
+              questionsForHuman: [],
+              proposedSpecDelta: "",
+              milestoneReached: null,
+              implementationPlan: null,
+              proposedQuestions: null,
+              synthesizedQuestions: null,
+              followUpQuestions: null,
+              sufficientContext: null,
+              walkthroughGaps: [],
+              degraded: false
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: walkthroughTurn,
+              rawResponse: JSON.stringify(walkthroughTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          const isRevision =
+            input.prompt.includes("ADVERSARIAL WALKTHROUGH FINDINGS:")
+            || input.prompt.includes("SYNTHESIZED WALKTHROUGH REPAIR BRIEF:");
+          const turn: ModelTurn = {
+            actor: "claude",
+            rawText: isRevision ? "Final revised spec" : "Reviewed spec",
+            summary: isRevision ? "Revision complete" : "Review complete",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: isRevision ? "Final revised spec" : reviewedSpec,
+            milestoneReached: "implementation_plan_ready",
+            implementationPlan: isRevision ? "Final revised plan" : reviewedPlan,
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: null,
+            degraded: false
+          };
+          yield {
+            type: "structured_turn",
+            actor: "claude",
+            turn,
+            rawResponse: JSON.stringify(turn)
+          } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const result = await createPhaseOrchestrator({ gpt, claude }).runSpecGeneration(
+        "s1",
+        "Design a task manager",
+        [{ question: "Scope?", answer: "Web only" }],
+        "Use React + Node"
+      );
+
+      expect(result.spec).toBe("Final revised spec");
+      expect(result.trace.revisionInputSynthesized).toBe(false);
+      expect(result.trace.revisionInputShaping).toMatchObject({
+        applied: false,
+        softBudgetApplied: false,
+        softBudgetCompactRevisionBriefApplied: false
+      });
+      const revisionPrompt = claudePrompts.at(-1)!.prompt;
+      expect(revisionPrompt).toContain("ADVERSARIAL WALKTHROUGH FINDINGS:");
+      expect(revisionPrompt).not.toContain("# Specification Authority References");
+    });
+
     it("synthesizes a gap-heavy revision input at the Claude soft budget even when the hard budget is not hit", async () => {
       const reviewedSpec = "# Reviewed Spec\n\nShort authoritative draft.";
       const reviewedPlan = "# Reviewed Plan\n\n1. Short plan.";
@@ -1643,9 +1772,9 @@ describe("createPhaseOrchestrator", () => {
             gapSynthesisCalls += 1;
             const synthesisTurn = {
               ...baseTurn,
-              rawText: "## Soft-Budget Repair Brief\n\n- RC-1 covers gaps 1-18 with ordered rollback and acceptance fixes.",
+              rawText: "## Soft-Budget Repair Brief\n\n- RC-1 covers gaps: 1–18 with ordered rollback and acceptance fixes.",
               summary: "Soft-budget gap synthesis complete",
-              proposedSpecDelta: "## Soft-Budget Repair Brief\n\n- RC-1 covers gaps 1-18 with ordered rollback and acceptance fixes.",
+              proposedSpecDelta: "## Soft-Budget Repair Brief\n\n- RC-1 covers gaps: 1–18 with ordered rollback and acceptance fixes.",
               implementationPlan: ""
             };
             yield {
@@ -1699,7 +1828,7 @@ describe("createPhaseOrchestrator", () => {
       });
       const revisionPrompt = claudePrompts.at(-1)!.prompt;
       expect(revisionPrompt).toContain("SYNTHESIZED WALKTHROUGH REPAIR BRIEF");
-      expect(revisionPrompt).toContain("RC-1 covers gaps 1-18");
+      expect(revisionPrompt).toContain("RC-1 covers gaps: 1–18");
     });
 
     it("fails closed when a synthesized gap brief omits original walkthrough gap coverage", async () => {
