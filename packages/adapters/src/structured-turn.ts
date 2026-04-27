@@ -78,35 +78,13 @@ function stripCodeFences(text: string): string {
   return match ? match[1].trim() : text;
 }
 
-interface ParseStructuredTurnOptions {
-  requireExactJsonObject?: boolean;
-}
-
-function extractJsonFromText(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("No JSON object found");
-    }
-    return JSON.parse(jsonMatch[0]);
-  }
-}
-
-export function parseStructuredTurn(
-  actor: "gpt" | "claude",
-  rawValue: unknown,
-  options: ParseStructuredTurnOptions = {}
-): ModelTurn {
+export function parseStructuredTurn(actor: "gpt" | "claude", rawValue: unknown): ModelTurn {
   let parsedJson: unknown = rawValue;
 
   if (typeof rawValue === "string") {
-    const cleaned = rawValue.trim();
+    const cleaned = stripCodeFences(rawValue.trim());
     try {
-      parsedJson = options.requireExactJsonObject
-        ? JSON.parse(cleaned)
-        : extractJsonFromText(stripCodeFences(cleaned));
+      parsedJson = JSON.parse(cleaned);
     } catch {
       return createDegradedTurn(actor, rawValue);
     }

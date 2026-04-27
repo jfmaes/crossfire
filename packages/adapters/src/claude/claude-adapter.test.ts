@@ -2,33 +2,29 @@ import { describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "./claude-adapter";
 
 class FakeClaudeProcess {
-  constructor(
-    private readonly responseText = JSON.stringify({
-      rawText: "Need the human to confirm mobile support.",
-      summary: "Need human confirmation on mobile support",
-      newInsights: [],
-      assumptions: [],
-      disagreements: [],
-      questionsForPeer: [],
-      questionsForHuman: ["Should mobile support be included in v1?"],
-      proposedSpecDelta: "Include mobile web support",
-      milestoneReached: null,
-      implementationPlan: null,
-      proposedQuestions: null,
-      synthesizedQuestions: null,
-      followUpQuestions: null,
-      sufficientContext: null,
-      walkthroughGaps: null
-    })
-  ) {}
-
   readonly calls: Array<{ sessionId: string; prompt: string; resumeSessionId?: string }> = [];
 
   async *runTurn(input: { sessionId: string; prompt: string; resumeSessionId?: string }) {
     this.calls.push(input);
     yield {
       type: "result",
-      text: this.responseText,
+      text: JSON.stringify({
+        rawText: "Need the human to confirm mobile support.",
+        summary: "Need human confirmation on mobile support",
+        newInsights: [],
+        assumptions: [],
+        disagreements: [],
+        questionsForPeer: [],
+        questionsForHuman: ["Should mobile support be included in v1?"],
+        proposedSpecDelta: "Include mobile web support",
+        milestoneReached: null,
+        implementationPlan: null,
+        proposedQuestions: null,
+        synthesizedQuestions: null,
+        followUpQuestions: null,
+        sufficientContext: null,
+        walkthroughGaps: null
+      }),
       cliSessionId: `${input.prompt}-session`
     } as const;
   }
@@ -144,45 +140,5 @@ describe("ClaudeAdapter", () => {
     expect(eventTypes).toContain("error");
     expect(eventTypes).not.toContain("structured_turn");
     expect(errorMessage).toContain("Failed to authenticate.");
-  });
-
-  it("rejects prose-wrapped spec-generation output at runtime", async () => {
-    const process = new FakeClaudeProcess([
-      "Here is the JSON:",
-      "{",
-      '  "rawText": "Need the human to confirm mobile support.",',
-      '  "summary": "Need human confirmation on mobile support",',
-      '  "newInsights": [],',
-      '  "assumptions": [],',
-      '  "disagreements": [],',
-      '  "questionsForPeer": [],',
-      '  "questionsForHuman": ["Should mobile support be included in v1?"],',
-      '  "proposedSpecDelta": "Include mobile web support",',
-      '  "milestoneReached": "implementation_plan_ready",',
-      '  "implementationPlan": "Plan body",',
-      '  "proposedQuestions": null,',
-      '  "synthesizedQuestions": null,',
-      '  "followUpQuestions": null,',
-      '  "sufficientContext": null,',
-      '  "walkthroughGaps": null',
-      "}",
-      "End of response."
-    ].join("\n"));
-    const adapter = new ClaudeAdapter(process);
-    const turns = [];
-
-    for await (const event of adapter.sendTurn({
-      sessionId: "sess_1",
-      phase: "spec_generation",
-      prompt: "spec prompt"
-    })) {
-      if (event.type === "structured_turn") {
-        turns.push(event.turn);
-      }
-    }
-
-    expect(turns).toHaveLength(1);
-    expect(turns[0]?.degraded).toBe(true);
-    expect(turns[0]?.rawText).toContain("Here is the JSON:");
   });
 });

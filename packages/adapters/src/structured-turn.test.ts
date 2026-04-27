@@ -2,64 +2,6 @@ import { describe, expect, it } from "vitest";
 import { parseStructuredTurn } from "./structured-turn";
 
 describe("parseStructuredTurn", () => {
-  it("rejects prose-wrapped spec-generation JSON in strict mode", () => {
-    const turn = parseStructuredTurn("claude", [
-      "Here is the JSON:",
-      "{",
-      '  "rawText": "Full reasoning",',
-      '  "summary": "Short summary",',
-      '  "proposedSpecDelta": "Spec delta",',
-      '  "milestoneReached": "implementation_plan_ready",',
-      '  "implementationPlan": "Plan body"',
-      "}",
-      "End of response."
-    ].join("\n"), { requireExactJsonObject: true });
-
-    expect(turn.degraded).toBe(true);
-    expect(turn.summary).toContain("Here is the JSON:");
-  });
-
-  it("rejects fenced spec-generation JSON in strict mode", () => {
-    const turn = parseStructuredTurn("claude", [
-      "```json",
-      "{",
-      '  "rawText": "Full reasoning",',
-      '  "summary": "Short summary",',
-      '  "proposedSpecDelta": "Spec delta",',
-      '  "milestoneReached": "implementation_plan_ready",',
-      '  "implementationPlan": "Plan body"',
-      "}",
-      "```"
-    ].join("\n"), { requireExactJsonObject: true });
-
-    expect(turn.degraded).toBe(true);
-    expect(turn.summary).toContain("```json");
-  });
-
-  it("recovers valid structured JSON wrapped in extra prose", () => {
-    const turn = parseStructuredTurn("claude", [
-      "I will respond with the required JSON object only.",
-      "{",
-      '  "rawText": "Full reasoning",',
-      '  "summary": "Short summary",',
-      '  "newInsights": [],',
-      '  "assumptions": [],',
-      '  "disagreements": [],',
-      '  "questionsForPeer": [],',
-      '  "questionsForHuman": [],',
-      '  "proposedSpecDelta": "Spec delta",',
-      '  "milestoneReached": "architecture_selected"',
-      "}",
-      "End of response."
-    ].join("\n"));
-
-    expect(turn.degraded).toBe(false);
-    expect(turn.rawText).toBe("Full reasoning");
-    expect(turn.summary).toBe("Short summary");
-    expect(turn.proposedSpecDelta).toBe("Spec delta");
-    expect(turn.milestoneReached).toBe("architecture_selected");
-  });
-
   it("defaults only harmless fields and keeps omitted control fields observable", () => {
     const turn = parseStructuredTurn("gpt", JSON.stringify({
       rawText: "Analysis text",
