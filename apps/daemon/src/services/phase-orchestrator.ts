@@ -168,6 +168,44 @@ interface TurnTrace {
   promptLedger: PromptLedgerEntry[];
 }
 
+export interface SpecGenerationFailureDiagnostics {
+  phase: "spec_generation";
+  provider: "claude";
+  substep: "revision";
+  outputStatus: "degraded";
+  missingFields: string[];
+  rawResponsePreview: string;
+  promptLedgerSizes: {
+    originalProblem: number;
+    interviewResults: number;
+    finalApproachHandoff: number;
+    revisionPeerDraft: number;
+  };
+  revisionPeerDraftChars: number;
+}
+
+export class SpecGenerationDiagnosticsError extends Error {
+  constructor(
+    message: string,
+    public readonly diagnostics: SpecGenerationFailureDiagnostics
+  ) {
+    super(message);
+    this.name = "SpecGenerationDiagnosticsError";
+  }
+}
+
+interface InvalidTurnOutputDetails {
+  model: "gpt" | "claude";
+  phase: PhaseValidationPhase;
+  outputStatus: TurnTrace["outputStatus"];
+  missingFields: string[];
+  conversationReused: boolean;
+  promptLedger: PromptLedgerEntry[];
+  rawText: string;
+  rawResponse: string;
+  parsed: Record<string, unknown> | null;
+}
+
 class AuthorityInputTooLargeError extends Error {
   constructor(
     public readonly code: "spec_generation_input_too_large" | "revision_input_too_large",
@@ -183,6 +221,7 @@ class AuthorityInputTooLargeError extends Error {
 const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
+const RAW_RESPONSE_PREVIEW_MAX_CHARS = 1_200;
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
   // Try direct parse first
@@ -214,6 +253,7 @@ async function collectTurnOutput(
     prompt: string;
     phase: PhaseValidationPhase;
     promptLedger?: PromptLedgerEntry[];
+    invalidOutputErrorFactory?: (details: InvalidTurnOutputDetails) => Error;
   }
 ): Promise<{ rawText: string; parsed: Record<string, unknown> | null; trace: TurnTrace }> {
   const model = provider.name as "gpt" | "claude";
@@ -364,7 +404,19 @@ async function collectTurnOutput(
   });
 
   if (outputStatus !== "ok") {
-    throw new Error(`${model.toUpperCase()} ${input.phase} failed: ${outputStatus === "degraded" ? "degraded structured output" : `missing required fields: ${missingFields.join(", ")}`}`);
+    const details: InvalidTurnOutputDetails = {
+      model,
+      phase: input.phase,
+      outputStatus,
+      missingFields,
+      conversationReused,
+      promptLedger: input.promptLedger ?? [],
+      rawText,
+      rawResponse,
+      parsed
+    };
+    throw input.invalidOutputErrorFactory?.(details)
+      ?? new Error(buildInvalidTurnOutputMessage(details));
   }
 
   return {
@@ -904,18 +956,46 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           peerDraft: revisionPeerDraft,
           mode
         });
+        const revisionPromptLedger = [
+          makePromptLedgerEntry("originalProblem", prompt),
+          makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+          approachLedgerEntry,
+          revisionPeerDraftLedgerEntry
+        ];
 
         const revisionResult = await collectTurnOutput(input.claude, {
           sessionId,
           runId,
           prompt: revisionPrompt,
           phase: "spec_generation",
-          promptLedger: [
-            makePromptLedgerEntry("originalProblem", prompt),
-            makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
-            approachLedgerEntry,
-            revisionPeerDraftLedgerEntry
-          ]
+          promptLedger: revisionPromptLedger,
+          invalidOutputErrorFactory: (details) => {
+            if (details.outputStatus !== "degraded") {
+              return new Error(buildInvalidTurnOutputMessage(details));
+            }
+
+            const diagnostics = buildSpecGenerationFailureDiagnostics({
+              promptLedger: revisionPromptLedger,
+              rawResponse: details.rawResponse || details.rawText,
+              missingFields: details.missingFields,
+              revisionPeerDraftChars: revisionPeerDraft.length
+            });
+
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              model: "claude",
+              phase: "spec_generation",
+              metadata: diagnostics as Record<string, unknown>,
+              message: "Claude spec revision returned degraded structured output"
+            });
+
+            return new SpecGenerationDiagnosticsError(
+              buildInvalidTurnOutputMessage(details),
+              diagnostics
+            );
+          }
         });
         revisionTrace = revisionResult.trace;
 
@@ -1198,6 +1278,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
   };
 }
 
+export function isSpecGenerationDiagnosticsError(error: unknown): error is SpecGenerationDiagnosticsError {
+  return error instanceof SpecGenerationDiagnosticsError;
+}
+
 function toFeedbackChunkMetadata(chunk: FeedbackChunk): Record<string, unknown> {
   return {
     id: chunk.id,
@@ -1440,6 +1524,54 @@ function formatWalkthroughGapReport(gaps: WalkthroughGap[]): string {
   return gaps
     .map((gap, index) => `${index + 1}. **${gap.location}**: ${gap.issue}\n   Fix: ${gap.fix}`)
     .join("\n\n");
+}
+
+function buildInvalidTurnOutputMessage(details: InvalidTurnOutputDetails): string {
+  return `${details.model.toUpperCase()} ${details.phase} failed: ${
+    details.outputStatus === "degraded"
+      ? "degraded structured output"
+      : `missing required fields: ${details.missingFields.join(", ")}`
+  }`;
+}
+
+function buildSpecGenerationFailureDiagnostics(input: {
+  promptLedger: PromptLedgerEntry[];
+  rawResponse: string;
+  missingFields: string[];
+  revisionPeerDraftChars: number;
+}): SpecGenerationFailureDiagnostics {
+  const promptLedgerSizes = summarizePromptLedgerSizes(input.promptLedger);
+
+  return {
+    phase: "spec_generation",
+    provider: "claude",
+    substep: "revision",
+    outputStatus: "degraded",
+    missingFields: input.missingFields,
+    rawResponsePreview: capPreview(input.rawResponse, RAW_RESPONSE_PREVIEW_MAX_CHARS),
+    promptLedgerSizes: {
+      originalProblem: promptLedgerSizes.originalProblem,
+      interviewResults: promptLedgerSizes.interviewResults,
+      finalApproachHandoff: promptLedgerSizes.finalApproachHandoff,
+      revisionPeerDraft: promptLedgerSizes.revisionPeerDraft
+    },
+    revisionPeerDraftChars: input.revisionPeerDraftChars
+  };
+}
+
+function summarizePromptLedgerSizes(promptLedger: PromptLedgerEntry[]): Record<string, number> {
+  return promptLedger.reduce<Record<string, number>>((sizes, entry) => {
+    sizes[entry.name] = entry.finalChars;
+    return sizes;
+  }, {});
+}
+
+function capPreview(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return `${text.slice(0, maxChars - 1)}…`;
 }
 
 function buildRevisionPeerDraft(input: {

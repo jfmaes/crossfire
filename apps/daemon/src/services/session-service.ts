@@ -10,7 +10,10 @@ import type {
 } from "@council/storage";
 import { collectGroundingContext } from "./grounding";
 import { writeSpecArtifact } from "./artifacts";
-import { createPhaseOrchestrator } from "./phase-orchestrator";
+import {
+  createPhaseOrchestrator,
+  isSpecGenerationDiagnosticsError
+} from "./phase-orchestrator";
 import { onProgress } from "./progress";
 import { resolveExistingSpecInput } from "./existing-spec-input";
 
@@ -302,7 +305,10 @@ export function createSessionService(input: SessionServiceInput) {
       recentRuns: input.repository.findRunsBySession(id),
       summary,
       interviewState: buildInterviewState(id),
-      phaseResult: session.phase ? getPhaseResult(id, session.phase) : null,
+      phaseResult: session.phase
+        ? getPhaseResult(id, session.phase)
+          ?? (session.phase === "spec_generation" ? getPhaseResult(id, "spec_generation_failure") : null)
+        : null,
       analysisResult: mergedAnalysisResult
     };
   }
@@ -1520,6 +1526,13 @@ export function createSessionService(input: SessionServiceInput) {
         id, originalPrompt, interviewResults, finalApproachHandoff, runId, mode
       );
     } catch (error) {
+      if (isSpecGenerationDiagnosticsError(error)) {
+        input.repository.savePhaseResult({
+          sessionId: id,
+          phase: "spec_generation_failure",
+          resultJson: JSON.stringify(error.diagnostics)
+        });
+      }
       input.repository.updateStatus({ id, status: "errored" });
       throw error;
     }

@@ -606,6 +606,245 @@ describe("createPhaseOrchestrator", () => {
       expect(result.walkthroughGaps!.length).toBe(2);
     });
 
+    it("surfaces structured diagnostics when the final Claude revision degrades", async () => {
+      const events: ProgressEvent[] = [];
+      const unsubscribe = onProgress((event) => events.push(event));
+      const originalProblem = "Design a task manager";
+      const interviewResults = [{ question: "Scope?", answer: "Web only" }];
+      const finalApproachHandoff = "Use React + Node";
+      const reviewedSpec = "# Reviewed Spec\n\nShip the task manager";
+      const reviewedPlan = "# Reviewed Plan\n\n1. Build the task manager";
+      const gapReport = "1. **Section 2**: Missing rollback behavior\n   Fix: Add rollback steps";
+      const revisionPeerDraft = [
+        reviewedSpec,
+        "",
+        "---",
+        "",
+        "IMPLEMENTATION PLAN:",
+        reviewedPlan,
+        "",
+        "---",
+        "",
+        "ADVERSARIAL WALKTHROUGH FINDINGS:",
+        "Both models independently simulated executing this spec and found the following operational gaps.",
+        "Incorporate the fixes below into the spec and plan. Do NOT simply acknowledge them — actually modify the relevant sections.",
+        "",
+        gapReport
+      ].join("\n");
+      const interviewTranscript = interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n");
+      const wrappedRevisionResponse = [
+        "Here is the JSON you requested:",
+        JSON.stringify({
+          actor: "claude",
+          rawText: "Revision raw response body",
+          summary: "Revision summary",
+          newInsights: [],
+          assumptions: [],
+          disagreements: [],
+          questionsForPeer: [],
+          questionsForHuman: [],
+          proposedSpecDelta: "Revised spec content",
+          milestoneReached: "implementation_plan_ready",
+          implementationPlan: "Revised plan",
+          proposedQuestions: null,
+          synthesizedQuestions: null,
+          followUpQuestions: null,
+          sufficientContext: null,
+          walkthroughGaps: null,
+          degraded: true
+        }),
+        "Thanks."
+      ].join("\n");
+
+      const gpt: ProviderAdapter = {
+        name: "gpt",
+        async *sendTurn(input: ProviderTurnInput) {
+          const isWalkthrough = input.phase === "walkthrough";
+          const turn: ModelTurn = {
+            actor: "gpt",
+            rawText: isWalkthrough ? "GPT found rollback gaps" : "GPT draft",
+            summary: isWalkthrough ? "GPT walkthrough" : "GPT draft summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: isWalkthrough ? "" : "Draft spec content",
+            milestoneReached: isWalkthrough ? null : "implementation_plan_ready",
+            implementationPlan: isWalkthrough ? null : "Draft implementation plan",
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: isWalkthrough
+              ? [{ location: "Section 2", issue: "Missing rollback behavior", fix: "Add rollback steps" }]
+              : null,
+            degraded: false
+          };
+          yield { type: "structured_turn", actor: "gpt", turn, rawResponse: JSON.stringify(turn) } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      const claude: ProviderAdapter = {
+        name: "claude",
+        async *sendTurn(input: ProviderTurnInput) {
+          if (input.phase === "walkthrough") {
+            const walkthroughTurn: ModelTurn = {
+              actor: "claude",
+              rawText: "Claude found no extra gaps",
+              summary: "Claude walkthrough",
+              newInsights: [],
+              assumptions: [],
+              disagreements: [],
+              questionsForPeer: [],
+              questionsForHuman: [],
+              proposedSpecDelta: "",
+              milestoneReached: null,
+              implementationPlan: null,
+              proposedQuestions: null,
+              synthesizedQuestions: null,
+              followUpQuestions: null,
+              sufficientContext: null,
+              walkthroughGaps: [],
+              degraded: false
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: walkthroughTurn,
+              rawResponse: JSON.stringify(walkthroughTurn)
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          const isRevision = input.prompt.includes("ADVERSARIAL WALKTHROUGH FINDINGS:");
+          if (isRevision) {
+            const degradedTurn: ModelTurn = {
+              actor: "claude",
+              rawText: wrappedRevisionResponse,
+              summary: "Revision summary",
+              newInsights: [],
+              assumptions: [],
+              disagreements: [],
+              questionsForPeer: [],
+              questionsForHuman: [],
+              proposedSpecDelta: "",
+              milestoneReached: "implementation_plan_ready",
+              implementationPlan: null,
+              proposedQuestions: null,
+              synthesizedQuestions: null,
+              followUpQuestions: null,
+              sufficientContext: null,
+              walkthroughGaps: null,
+              degraded: true
+            };
+            yield {
+              type: "structured_turn",
+              actor: "claude",
+              turn: degradedTurn,
+              rawResponse: wrappedRevisionResponse
+            } as const;
+            yield { type: "done" } as const;
+            return;
+          }
+
+          const reviewTurn: ModelTurn = {
+            actor: "claude",
+            rawText: "Claude review",
+            summary: "Claude review summary",
+            newInsights: [],
+            assumptions: [],
+            disagreements: [],
+            questionsForPeer: [],
+            questionsForHuman: [],
+            proposedSpecDelta: reviewedSpec,
+            milestoneReached: "implementation_plan_ready",
+            implementationPlan: reviewedPlan,
+            proposedQuestions: null,
+            synthesizedQuestions: null,
+            followUpQuestions: null,
+            sufficientContext: null,
+            walkthroughGaps: null,
+            degraded: false
+          };
+          yield {
+            type: "structured_turn",
+            actor: "claude",
+            turn: reviewTurn,
+            rawResponse: JSON.stringify(reviewTurn)
+          } as const;
+          yield { type: "done" } as const;
+        },
+        async healthCheck() {
+          return { ok: true, detail: "ready" };
+        }
+      };
+
+      try {
+        await createPhaseOrchestrator({ gpt, claude }).runSpecGeneration(
+          "s1",
+          originalProblem,
+          interviewResults,
+          finalApproachHandoff,
+          "run_1"
+        );
+        throw new Error("Expected degraded Claude revision to reject");
+      } catch (error) {
+        const failure = error as Error & {
+          diagnostics?: {
+            phase?: string;
+            provider?: string;
+            substep?: string;
+            rawResponsePreview?: string;
+            promptLedgerSizes?: Record<string, number>;
+            revisionPeerDraftChars?: number;
+          };
+        };
+
+        expect(failure.message).toContain("CLAUDE spec_generation failed: degraded structured output");
+        expect(failure.diagnostics).toMatchObject({
+          phase: "spec_generation",
+          provider: "claude",
+          substep: "revision",
+          rawResponsePreview: expect.stringContaining("Here is the JSON you requested:"),
+          promptLedgerSizes: {
+            originalProblem: originalProblem.length,
+            interviewResults: interviewTranscript.length,
+            finalApproachHandoff: finalApproachHandoff.length,
+            revisionPeerDraft: revisionPeerDraft.length
+          },
+          revisionPeerDraftChars: revisionPeerDraft.length
+        });
+
+        const degradedRevisionEvent = events.find((event) =>
+          event.phase === "spec_generation"
+          && event.metadata?.substep === "revision"
+          && event.metadata?.provider === "claude"
+        );
+
+        expect(degradedRevisionEvent?.metadata).toMatchObject({
+          phase: "spec_generation",
+          provider: "claude",
+          substep: "revision",
+          rawResponsePreview: expect.stringContaining("Here is the JSON you requested:"),
+          promptLedgerSizes: {
+            originalProblem: originalProblem.length,
+            interviewResults: interviewTranscript.length,
+            finalApproachHandoff: finalApproachHandoff.length,
+            revisionPeerDraft: revisionPeerDraft.length
+          },
+          revisionPeerDraftChars: revisionPeerDraft.length
+        });
+      } finally {
+        unsubscribe();
+      }
+    });
+
     it("throws when a provider reports an error instead of masking it as empty output", async () => {
       const orchestrator = createPhaseOrchestrator({
         gpt: createAnalysisProvider("gpt"),
