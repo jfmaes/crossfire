@@ -77,6 +77,19 @@ interface WalkthroughGap {
   fix: string;
 }
 
+interface RevisionInputShapingTrace {
+  applied: boolean;
+  trigger: "none" | "soft_budget" | "hard_budget";
+  budgetChars: number | null;
+  originalChars: number;
+  finalChars: number;
+  gapReportSynthesized: boolean;
+  specCompacted: boolean;
+  planCompacted: boolean;
+  specSectionsCompacted: string[];
+  planSectionsCompacted: string[];
+}
+
 interface SpecGenerationResult {
   spec: string;
   implementationPlan: string;
@@ -91,6 +104,7 @@ interface SpecGenerationResult {
     revision?: TurnTrace;
     revisedAfterWalkthrough: boolean;
     revisionInputSynthesized: boolean;
+    revisionInputShaping: RevisionInputShapingTrace;
     gapCount: number;
     freshContext: {
       draft: boolean;
@@ -231,6 +245,7 @@ class AuthorityInputTooLargeError extends Error {
 const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
+const CLAUDE_REVISION_SOFT_BUDGET_CHARS = 45_000;
 const RAW_RESPONSE_PREVIEW_MAX_CHARS = 1_200;
 const SPEC_GENERATION_RECOVERY_INSTRUCTION = [
   "Recovery retry: previous response was rejected because it was not a valid raw JSON object.",
@@ -880,6 +895,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       let revisionTrace: TurnTrace | undefined;
       let gapSynthesisTrace: TurnTrace | undefined;
       let revisionInputSynthesized = false;
+      let revisionInputShaping = createRevisionInputShapingTrace();
       const degradedOutputRetry: SpecGenerationResult["trace"]["degradedOutputRetry"] = {
         attempted: false,
         reason: null,
@@ -890,12 +906,14 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
 
         const gapReport = formatWalkthroughGapReport(allGaps);
+        let revisionGapReport = gapReport;
         let revisionPeerDraft = buildRevisionPeerDraft({
           reviewedSpec,
           reviewedPlan,
-          gapReport,
+          gapReport: revisionGapReport,
           synthesized: false
         });
+        revisionInputShaping = createRevisionInputShapingTrace(revisionPeerDraft.length);
 
         if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
           emitProgress({
@@ -933,13 +951,22 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           });
           gapSynthesisTrace = synthesisResult.trace;
           const synthesizedGapReport = extractGapSynthesisBrief(synthesisResult, gapReport);
+          revisionGapReport = synthesizedGapReport;
           revisionPeerDraft = buildRevisionPeerDraft({
             reviewedSpec,
             reviewedPlan,
-            gapReport: synthesizedGapReport,
+            gapReport: revisionGapReport,
             synthesized: true
           });
           revisionInputSynthesized = true;
+          revisionInputShaping = {
+            ...revisionInputShaping,
+            applied: true,
+            trigger: "hard_budget",
+            budgetChars: REVISION_INPUT_BUDGET_CHARS,
+            gapReportSynthesized: true,
+            finalChars: revisionPeerDraft.length
+          };
 
           emitProgress({
             sessionId,
@@ -955,6 +982,45 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
             },
             message: `Synthesized ${allGaps.length} walkthrough gap(s) into ${synthesizedGapReport.length} chars`
           });
+        }
+
+        if (revisionPeerDraft.length > CLAUDE_REVISION_SOFT_BUDGET_CHARS) {
+          const compactedRevisionInput = compactClaudeRevisionAuthorityDraft({
+            reviewedSpec,
+            reviewedPlan,
+            gapReport: revisionGapReport,
+            synthesized: revisionInputShaping.gapReportSynthesized,
+            budgetChars: CLAUDE_REVISION_SOFT_BUDGET_CHARS
+          });
+
+          if (compactedRevisionInput.applied) {
+            revisionPeerDraft = compactedRevisionInput.revisionPeerDraft;
+            revisionInputSynthesized = true;
+            revisionInputShaping = {
+              ...revisionInputShaping,
+              applied: true,
+              trigger: revisionInputShaping.trigger === "hard_budget" ? "hard_budget" : "soft_budget",
+              budgetChars: revisionInputShaping.trigger === "hard_budget"
+                ? REVISION_INPUT_BUDGET_CHARS
+                : CLAUDE_REVISION_SOFT_BUDGET_CHARS,
+              finalChars: revisionPeerDraft.length,
+              specCompacted: compactedRevisionInput.specCompacted,
+              planCompacted: compactedRevisionInput.planCompacted,
+              specSectionsCompacted: compactedRevisionInput.specSectionsCompacted,
+              planSectionsCompacted: compactedRevisionInput.planSectionsCompacted
+            };
+
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              phase: "spec_generation",
+              metadata: {
+                revisionInputShaping
+              },
+              message: `Claude revision input exceeded the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; compacted authority-path drafts before revision`
+            });
+          }
         }
 
         ensureAuthorityInputFits({
@@ -998,8 +1064,11 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               return new Error(buildInvalidTurnOutputMessage(details));
             }
 
+            const outputStatus = details.outputStatus === "degraded"
+              ? "degraded"
+              : "phase_invalid";
             const diagnostics = buildSpecGenerationFailureDiagnostics({
-              outputStatus: details.outputStatus,
+              outputStatus,
               promptLedger: revisionPromptLedger,
               rawResponse: details.rawResponse || details.rawText,
               missingFields: details.missingFields,
@@ -1013,7 +1082,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               type: "info",
               model: "claude",
               phase: "spec_generation",
-              metadata: diagnostics as Record<string, unknown>,
+              metadata: diagnostics as unknown as Record<string, unknown>,
               message: details.outputStatus === "degraded"
                 ? "Claude spec revision returned degraded structured output"
                 : "Claude spec revision retry returned phase-invalid structured output"
@@ -1086,6 +1155,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           revision: revisionTrace,
           revisedAfterWalkthrough: allGaps.length > 0,
           revisionInputSynthesized,
+          revisionInputShaping,
           gapCount: allGaps.length,
           freshContext: {
             draft: true,
@@ -1097,12 +1167,12 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           canonicalApproachHandoff: true,
           usedCanonicalApproachHandoff: true,
           authorityPathUncompressed: true,
-          authorityPathUncompacted: true,
+          authorityPathUncompacted: !revisionInputShaping.applied,
           degradedOutputRetry,
           compaction: {
             approachResult: false,
             peerDraft: false,
-            revisionPeerDraft: false
+            revisionPeerDraft: revisionInputShaping.applied
           }
         }
       };
@@ -1400,6 +1470,21 @@ function makePromptLedgerEntry(
   };
 }
 
+function createRevisionInputShapingTrace(originalChars = 0): RevisionInputShapingTrace {
+  return {
+    applied: false,
+    trigger: "none",
+    budgetChars: null,
+    originalChars,
+    finalChars: originalChars,
+    gapReportSynthesized: false,
+    specCompacted: false,
+    planCompacted: false,
+    specSectionsCompacted: [],
+    planSectionsCompacted: []
+  };
+}
+
 function emitCompactionProgress(input: {
   sessionId: string;
   runId?: string;
@@ -1498,6 +1583,96 @@ function compactMarkdown(text: string, budgetChars: number): {
     text: `${compactedText}${footer}`,
     compacted: true,
     sectionsCompacted
+  };
+}
+
+function compactClaudeRevisionAuthorityDraft(input: {
+  reviewedSpec: string;
+  reviewedPlan: string;
+  gapReport: string;
+  synthesized: boolean;
+  budgetChars: number;
+}): {
+  revisionPeerDraft: string;
+  applied: boolean;
+  specCompacted: boolean;
+  planCompacted: boolean;
+  specSectionsCompacted: string[];
+  planSectionsCompacted: string[];
+} {
+  const originalRevisionPeerDraft = buildRevisionPeerDraft({
+    reviewedSpec: input.reviewedSpec,
+    reviewedPlan: input.reviewedPlan,
+    gapReport: input.gapReport,
+    synthesized: input.synthesized
+  });
+
+  if (originalRevisionPeerDraft.length <= input.budgetChars) {
+    return {
+      revisionPeerDraft: originalRevisionPeerDraft,
+      applied: false,
+      specCompacted: false,
+      planCompacted: false,
+      specSectionsCompacted: [],
+      planSectionsCompacted: []
+    };
+  }
+
+  const shellChars = buildRevisionPeerDraft({
+    reviewedSpec: "",
+    reviewedPlan: "",
+    gapReport: input.gapReport,
+    synthesized: input.synthesized
+  }).length;
+  const totalContentChars = Math.max(1, input.reviewedSpec.length + input.reviewedPlan.length);
+  const contentBudget = Math.max(4_000, input.budgetChars - shellChars);
+
+  let specBudget = Math.max(
+    2_000,
+    Math.floor(contentBudget * (input.reviewedSpec.length / totalContentChars))
+  );
+  let planBudget = Math.max(1_500, contentBudget - specBudget);
+
+  if (specBudget + planBudget > contentBudget) {
+    const overflow = specBudget + planBudget - contentBudget;
+    if (specBudget >= planBudget) {
+      specBudget = Math.max(2_000, specBudget - overflow);
+    } else {
+      planBudget = Math.max(1_500, planBudget - overflow);
+    }
+  }
+
+  const buildCandidate = (nextSpecBudget: number, nextPlanBudget: number) => {
+    const compactedSpec = compactMarkdown(input.reviewedSpec, nextSpecBudget);
+    const compactedPlan = compactMarkdown(input.reviewedPlan, nextPlanBudget);
+
+    return {
+      revisionPeerDraft: buildRevisionPeerDraft({
+        reviewedSpec: compactedSpec.text,
+        reviewedPlan: compactedPlan.text,
+        gapReport: input.gapReport,
+        synthesized: input.synthesized
+      }),
+      specCompacted: compactedSpec.compacted,
+      planCompacted: compactedPlan.compacted,
+      specSectionsCompacted: compactedSpec.sectionsCompacted,
+      planSectionsCompacted: compactedPlan.sectionsCompacted
+    };
+  };
+
+  let bestCandidate = buildCandidate(specBudget, planBudget);
+  for (let attempt = 0; attempt < 5 && bestCandidate.revisionPeerDraft.length > input.budgetChars; attempt += 1) {
+    specBudget = Math.max(1_500, Math.floor(specBudget * 0.85));
+    planBudget = Math.max(1_000, Math.floor(planBudget * 0.85));
+    const candidate = buildCandidate(specBudget, planBudget);
+    if (candidate.revisionPeerDraft.length < bestCandidate.revisionPeerDraft.length) {
+      bestCandidate = candidate;
+    }
+  }
+
+  return {
+    ...bestCandidate,
+    applied: bestCandidate.specCompacted || bestCandidate.planCompacted
   };
 }
 
