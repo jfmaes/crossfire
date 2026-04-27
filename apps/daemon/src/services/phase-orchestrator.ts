@@ -2156,7 +2156,7 @@ function verifySynthesizedGapCoverage(
 function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<number> {
   const covered = new Set<number>();
   const normalizedText = text.replace(/[–—]/g, "-");
-  const negativeCoverageCue = /\b(?:unresolved|remaining|pending|missing|omitted?|exclude[sd]?|deferred?|not\s+covered|not\s+addressed|not\s+fixed|still\s+open|follow-?up|separate\s+fix)\b/i;
+  const negativeCoverageCue = /\b(?:unresolved|remaining|pending|missing|omitted?|exclude(?:[sd]|ing)?|except|deferred?|not\s+covered|not\s+addressed|not\s+fixed|still\s+open|follow-?up|separate\s+fix|other than)\b/i;
 
   for (const match of normalizedText.matchAll(/\bgaps?\b\s*:?\s*([^\n.;]*)/gi)) {
     const segment = (match[1] ?? "").trim();
@@ -2214,7 +2214,7 @@ function pickSectionAnchorIndices(sectionCount: number): number[] {
 }
 
 function stripNegativeCoverageTail(segment: string): string {
-  const contrastMatch = segment.match(/\s*(?:,|\bbut\b|\bhowever\b|\bexcept\b|\bexcluding\b|\bother than\b|\byet\b|\bwhile\b|\balthough\b|\bthough\b)\s*/i);
+  const contrastMatch = segment.match(/\s*(?:,|\bbut\b|\bhowever\b|\byet\b|\bwhile\b|\balthough\b|\bthough\b)\s*/i);
   if (!contrastMatch || contrastMatch.index === undefined) {
     return segment;
   }
