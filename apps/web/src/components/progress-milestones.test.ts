@@ -109,4 +109,66 @@ describe("deriveMilestones", () => {
       "Adversarial Walkthrough (both models simulate execution in parallel)"
     ]);
   });
+
+  it("includes blocked info events from metadata", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "info",
+        phase: "spec_generation",
+        message: "feedback input too large: prioritize the latest comments",
+        metadata: { blockedReason: "feedback_input_too_large" }
+      })
+    ]);
+
+    expect(milestones.map((milestone) => milestone.text)).toEqual([
+      "feedback input too large: prioritize the latest comments"
+    ]);
+  });
+
+  it("includes material gap synthesis info events driven by metadata", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "info",
+        phase: "gap_synthesis",
+        message: "Synthesized walkthrough gap brief omitted coverage for 2 original gap(s)",
+        metadata: { blockedReason: "gap_synthesis_coverage_incomplete" }
+      })
+    ]);
+
+    expect(milestones.map((milestone) => milestone.text)).toEqual([
+      "Synthesized walkthrough gap brief omitted coverage for 2 original gap(s)"
+    ]);
+  });
+
+  it("keeps non-material gap synthesis info excluded", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "info",
+        phase: "gap_synthesis",
+        message: "Synthesized 4 walkthrough gap(s) into 6210 chars",
+        metadata: {}
+      })
+    ]);
+
+    expect(milestones).toEqual([]);
+  });
+
+  it("does not depend on undeclared metadata fields to keep material events", () => {
+    const milestones = deriveMilestones([
+      makeEvent({
+        id: "evt_1",
+        type: "info",
+        phase: "spec_generation",
+        message: "Claude spec revision retry returned phase-invalid structured output",
+        metadata: { outputStatus: "phase_invalid" }
+      })
+    ]);
+
+    expect(milestones.map((milestone) => milestone.text)).toEqual([
+      "Claude spec revision retry returned phase-invalid structured output"
+    ]);
+  });
 });

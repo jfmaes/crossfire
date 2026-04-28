@@ -21,33 +21,28 @@ export function formatElapsed(ms?: number | null): string | null {
 function isMaterialInfoEvent(
   event: Pick<SessionRunEvent, "message" | "phase" | "metadata">
 ): boolean {
+  const blockedReason = event.metadata?.blockedReason;
+  if (typeof blockedReason === "string" && blockedReason.length > 0) {
+    return true;
+  }
+
+  if (
+    event.metadata?.outputStatus === "degraded" ||
+    event.metadata?.outputStatus === "phase_invalid" ||
+    event.metadata?.outputStatus === "provider_error"
+  ) {
+    return true;
+  }
+
   if (event.phase === "gap_synthesis") {
     return false;
   }
 
-  if (
-    event.message.startsWith("Debate:") ||
+  return event.message.startsWith("Debate:") ||
     event.message.startsWith("Debate stopped") ||
     event.message.startsWith("Debate finished") ||
     event.message.startsWith("Adversarial Walkthrough") ||
-    event.message.includes("operational gap(s) found")
-  ) {
-    return true;
-  }
-
-  const blockedReason = event.metadata?.blockedReason;
-  if (
-    blockedReason === "spec_generation_input_too_large" ||
-    blockedReason === "revision_input_too_large" ||
-    blockedReason === "feedback_input_too_large"
-  ) {
-    return true;
-  }
-
-  return event.metadata?.outputStatus === "degraded" ||
-    event.metadata?.outputStatus === "phase_invalid" ||
-    event.metadata?.outputStatus === "provider_error" ||
-    event.metadata?.retryAttempted === true;
+    event.message.includes("operational gap(s) found");
 }
 
 export function isMaterialMilestone(
