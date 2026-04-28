@@ -360,7 +360,7 @@ export function ProgressFeed({
           {active.length > 0 && <span className="progress-feed__live-dot" />}
           Live progress
         </h3>
-        {(active.length > 0 || pendingState) && (
+        {(active.length > 0 || (pendingState && milestones.length === 0)) && (
           <span className="progress-feed__badge">
             {active.length > 0 ? `${active.length} active` : "starting"}
           </span>
