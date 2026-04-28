@@ -10,7 +10,15 @@ export type CrossfireSessionStatus =
   | "finalized"
   | "errored";
 
-export type WorkflowRunStatus = CrossfireSessionStatus;
+export type CrossfireRunStatus = "running" | "finalized" | "errored";
+
+export type WorkflowRunStatus =
+  | "planning"
+  | "launching"
+  | "monitoring"
+  | "partially_blocked"
+  | "resuming"
+  | "settled";
 
 export type WorkflowChildState =
   | "running"
@@ -75,9 +83,9 @@ export interface WorkflowInterviewState {
   answeredCount: number;
 }
 
-export interface WorkflowRunSnapshot {
+export interface CrossfireRunSnapshot {
   id: string;
-  status: WorkflowRunStatus;
+  status: CrossfireRunStatus;
   phase?: string | null;
   errorMessage?: string | null;
 }
@@ -94,8 +102,8 @@ export interface WorkflowSessionSnapshot {
   };
   summary?: WorkflowSessionSummary;
   interviewState?: WorkflowInterviewState;
-  activeRun?: WorkflowRunSnapshot | null;
-  recentRuns?: WorkflowRunSnapshot[];
+  activeRun?: CrossfireRunSnapshot | null;
+  recentRuns?: CrossfireRunSnapshot[];
 }
 
 export interface WorkflowClassification {
@@ -114,8 +122,93 @@ export interface RecommendationBrief {
   questions: string[];
 }
 
-export interface WorkflowSpec {
-  id: WorkflowSpecId;
+export interface WorkflowChildView {
+  sessionId: string;
+  label: string;
+  lens: string;
+  state: WorkflowChildState;
+  classification: WorkflowClassification;
+  latestRunId?: string | null;
+  latestBrief?: RecommendationBrief | null;
+  snapshot: WorkflowSessionSnapshot;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowEscalationView {
+  id: string;
+  workflowRunId: string;
+  sessionId: string;
+  kind: RecommendationBrief["kind"];
+  brief: RecommendationBrief;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowRunSummary {
+  totalChildren: number;
+  runningChildren: number;
+  humanBlockedChildren: number;
+  resumingChildren: number;
+  finalizedChildren: number;
+  erroredChildren: number;
+  escalationCount: number;
+}
+
+export interface WorkflowRunRecord<TSpecId extends string = string, TInput = unknown> {
+  id: string;
+  specId: TSpecId;
+  status: WorkflowRunStatus;
+  input: TInput;
+  summary: WorkflowRunSummary;
+  createdAt: string;
+  updatedAt: string;
+  settledAt?: string | null;
+}
+
+export interface WorkflowRunFilter {
+  specId?: string;
+  status?: WorkflowRunStatus;
+}
+
+export interface WorkflowRunView<TSpecId extends string = string, TInput = unknown>
+  extends WorkflowRunRecord<TSpecId, TInput> {
+  childSessions: WorkflowChildView[];
+  escalations: RecommendationBrief[];
+}
+
+export interface WorkflowSessionResult {
+  snapshot: WorkflowSessionSnapshot;
+}
+
+export type Awaitable<T> = T | Promise<T>;
+
+export interface WorkflowRuntime {
+  createSession(template: SessionTemplate): Awaitable<WorkflowSessionResult>;
+  getSession(sessionId: string): Awaitable<WorkflowSessionResult>;
+  continueSession(sessionId: string, response: string): Awaitable<WorkflowSessionResult | void>;
+  listRunEvents(sessionId: string): Awaitable<Array<Record<string, unknown>>>;
+  subscribeProgress(listener: (event: { sessionId: string; runId?: string }) => void): () => void;
+}
+
+export interface WorkflowPersistence {
+  createWorkflowRun(run: WorkflowRunRecord): Awaitable<void>;
+  updateWorkflowRun(run: WorkflowRunRecord): Awaitable<void>;
+  upsertChildSession(workflowRunId: string, childSession: WorkflowChildView): Awaitable<void>;
+  createEscalation(
+    workflowRunId: string,
+    sessionId: string,
+    brief: RecommendationBrief
+  ): Awaitable<void>;
+  clearEscalations(workflowRunId: string): Awaitable<void>;
+  getWorkflowRun(workflowRunId: string): Awaitable<WorkflowRunRecord | null>;
+  listWorkflowRuns(filter?: WorkflowRunFilter): Awaitable<WorkflowRunRecord[]>;
+  getWorkflowChildren(workflowRunId: string): Awaitable<WorkflowChildView[]>;
+  getWorkflowEscalations(workflowRunId: string): Awaitable<RecommendationBrief[]>;
+}
+
+export interface WorkflowSpec<TSpecId extends string = WorkflowSpecId, TInput = ExistingSpecWorkflowInput> {
+  id: TSpecId;
   description: string;
-  buildSessionTemplates(input: ExistingSpecWorkflowInput): SessionTemplate[];
+  buildSessionTemplates(input: TInput): SessionTemplate[];
 }
