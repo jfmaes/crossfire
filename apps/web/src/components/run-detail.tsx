@@ -217,21 +217,22 @@ export function RunDetail({ run }: { run: SessionRun | null }) {
         <div className="run-detail__error">{run.errorMessage}</div>
       )}
 
+      {!loading && recentMilestones.length > 0 && (
+        <div className="run-detail__milestones">
+          <div className="run-detail__milestones-heading">Recent milestones</div>
+          {recentMilestones.map((milestone) => (
+            <div key={milestone.id} className="run-detail__milestone">
+              <span className="run-detail__event-time">{formatTimestamp(milestone.createdAt)}</span>
+              <span className="run-detail__event-message">{milestone.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="run-detail__events">
         {loading && <div className="run-detail__empty">Loading run events\u2026</div>}
         {!loading && events.length === 0 && (
           <div className="run-detail__empty">No persisted events for this run.</div>
-        )}
-        {!loading && recentMilestones.length > 0 && (
-          <div className="run-detail__milestones">
-            <div className="run-detail__milestones-heading">Recent milestones</div>
-            {recentMilestones.map((milestone) => (
-              <div key={milestone.id} className="run-detail__milestone">
-                <span className="run-detail__event-time">{formatTimestamp(milestone.createdAt)}</span>
-                <span className="run-detail__event-message">{milestone.text}</span>
-              </div>
-            ))}
-          </div>
         )}
         {!loading && events.map((event) => (
           <div key={event.id} className={`run-detail__event run-detail__event--${event.type}`}>

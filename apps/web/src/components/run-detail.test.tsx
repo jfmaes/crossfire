@@ -79,16 +79,21 @@ describe("RunDetail", () => {
       expect(screen.getByText("Recent milestones")).toBeTruthy();
     });
 
-    expect(screen.getByText("Claude finished analysis in 2m 56s")).toBeTruthy();
-    expect(screen.getByText("Done in 176.5s — 10989 chars")).toBeTruthy();
-    expect(screen.getByText("Reading additional input from stdin...")).toBeTruthy();
-
     const heading = screen.getByText("Recent milestones");
+    const milestoneSummary = heading.parentElement;
     const firstEvent = document.querySelector(".run-detail__event");
+    const eventsContainer = document.querySelector(".run-detail__events");
 
+    expect(milestoneSummary).toBeTruthy();
     expect(firstEvent).toBeTruthy();
+    expect(eventsContainer).toBeTruthy();
+    expect(milestoneSummary?.textContent).toContain("Phase 1: Dual Analysis (GPT + Claude in parallel)");
+    expect(milestoneSummary?.textContent).toContain("Claude finished analysis in 2m 56s");
+    expect(milestoneSummary?.textContent).not.toContain("Reading additional input from stdin...");
+    expect(eventsContainer?.textContent).toContain("Done in 176.5s — 10989 chars");
+    expect(eventsContainer?.textContent).toContain("Reading additional input from stdin...");
     expect(
-      heading.compareDocumentPosition(firstEvent as Node) & Node.DOCUMENT_POSITION_FOLLOWING
+      milestoneSummary?.compareDocumentPosition(eventsContainer as Node) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 });
