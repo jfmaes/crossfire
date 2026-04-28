@@ -1,6 +1,12 @@
 import { ClaudeAdapter, ClaudeCliProcess, CodexAdapter, CodexCliTransport, FakeProvider } from "@council/adapters";
-import { createDatabase, createInMemoryDatabase, SessionRepository } from "@council/storage";
+import {
+  createDatabase,
+  createInMemoryDatabase,
+  SessionRepository,
+  WorkflowRunRepository
+} from "@council/storage";
 import { createSessionService } from "./services/session-service";
+import { createWorkflowService } from "./services/workflow-service";
 import { buildServer } from "./server";
 import { enableDebugLogging } from "./services/debug-log";
 import { resolveAccessToken } from "./config";
@@ -21,9 +27,9 @@ if (process.env.CROSSFIRE_DEBUG === "1" || process.env.CROSSFIRE_DEBUG === "true
   enableDebugLogging(debugDir);
 }
 
-const repository = new SessionRepository(
-  providerMode === "fake" ? createInMemoryDatabase() : createDatabase(databasePath)
-);
+const database = providerMode === "fake" ? createInMemoryDatabase() : createDatabase(databasePath);
+const repository = new SessionRepository(database);
+const workflowRunRepository = new WorkflowRunRepository(database);
 const gpt =
   providerMode === "fake"
     ? new FakeProvider("gpt")
@@ -54,6 +60,11 @@ if (recovered > 0) {
   console.log(`Recovered ${recovered} orphaned session(s) from previous shutdown`);
 }
 
+const workflowService = createWorkflowService({
+  sessionService,
+  workflowRunRepository
+});
+
 const app = buildServer({
   accessToken,
   providerMode,
@@ -61,6 +72,8 @@ const app = buildServer({
   providers: { gpt, claude },
   sessionService
 });
+
+void workflowService;
 
 const address = await app.listen({ port, host });
 

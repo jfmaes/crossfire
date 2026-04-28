@@ -35,6 +35,11 @@ export interface WorkflowEscalationRow {
   updatedAt: string;
 }
 
+export interface WorkflowRunFilter {
+  specId?: string;
+  status?: string;
+}
+
 type WorkflowRunRecord = Omit<WorkflowRunRow, "input" | "summary"> & {
   inputJson: string;
   summaryJson: string;
@@ -158,6 +163,46 @@ export class WorkflowRunRepository {
     };
   }
 
+  listWorkflowRuns(filter?: WorkflowRunFilter): WorkflowRunRow[] {
+    const clauses: string[] = [];
+    const params: Array<string> = [];
+
+    if (filter?.specId) {
+      clauses.push("spec_id = ?");
+      params.push(filter.specId);
+    }
+
+    if (filter?.status) {
+      clauses.push("status = ?");
+      params.push(filter.status);
+    }
+
+    const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`
+        SELECT
+          id,
+          spec_id as specId,
+          status,
+          input_json as inputJson,
+          summary_json as summaryJson,
+          created_at as createdAt,
+          updated_at as updatedAt,
+          settled_at as settledAt
+        FROM workflow_runs
+        ${whereClause}
+        ORDER BY created_at DESC
+      `)
+      .all(...params) as WorkflowRunRecord[];
+
+    return rows.map(({ inputJson, summaryJson, ...workflowRun }) => ({
+      ...workflowRun,
+      input: JSON.parse(inputJson) as Record<string, unknown>,
+      summary: JSON.parse(summaryJson) as Record<string, unknown>,
+      settledAt: workflowRun.settledAt ?? null
+    }));
+  }
+
   findChildSessions(workflowRunId: string): WorkflowChildSessionRow[] {
     return this.db
       .prepare(`
@@ -202,5 +247,11 @@ export class WorkflowRunRepository {
       brief: JSON.parse(briefJson) as Record<string, unknown>,
       resolution: resolutionJson ? (JSON.parse(resolutionJson) as Record<string, unknown>) : null
     }));
+  }
+
+  clearEscalations(workflowRunId: string): void {
+    this.db
+      .prepare("DELETE FROM workflow_escalations WHERE workflow_run_id = ?")
+      .run(workflowRunId);
   }
 }

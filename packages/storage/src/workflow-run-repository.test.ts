@@ -189,6 +189,103 @@ describe("WorkflowRunRepository", () => {
         }
       })
     ]);
+    expect(repo.listWorkflowRuns()).toEqual([
+      expect.objectContaining({
+        id: "wf_1",
+        status: "settled"
+      })
+    ]);
+    expect(
+      repo.listWorkflowRuns({
+        specId: "parallel_existing_spec_review",
+        status: "settled"
+      })
+    ).toEqual([
+      expect.objectContaining({
+        id: "wf_1"
+      })
+    ]);
+    expect(
+      repo.listWorkflowRuns({
+        status: "monitoring"
+      })
+    ).toEqual([]);
+  });
+
+  it("clears stored escalations for a workflow run without affecting the run or child rows", () => {
+    const db = createInMemoryDatabase();
+    const sessionRepo = new SessionRepository(db);
+    const repo = new WorkflowRunRepository(db);
+
+    sessionRepo.create({
+      id: "sess_1",
+      title: "Child session",
+      status: "waiting_for_human"
+    });
+    repo.createWorkflowRun({
+      id: "wf_1",
+      specId: "parallel_existing_spec_review",
+      status: "partially_blocked",
+      input: {
+        title: "Review auth spec",
+        existingSpec: {
+          spec: "# Existing Spec"
+        }
+      },
+      summary: {
+        totalChildren: 1,
+        runningChildren: 0,
+        blockedChildren: 0,
+        finalizedChildren: 0,
+        erroredChildren: 0
+      },
+      createdAt: "2026-04-28T10:00:00.000Z",
+      updatedAt: "2026-04-28T10:00:00.000Z",
+      settledAt: null
+    });
+    repo.upsertChildSession({
+      workflowRunId: "wf_1",
+      sessionId: "sess_1",
+      label: "requirements",
+      lens: "requirements and ambiguity gaps",
+      state: "human_blocked",
+      latestRunId: null,
+      escalationId: null,
+      createdAt: "2026-04-28T10:00:01.000Z",
+      updatedAt: "2026-04-28T10:00:01.000Z"
+    });
+    repo.createEscalation({
+      id: "esc_1",
+      workflowRunId: "wf_1",
+      sessionId: "sess_1",
+      kind: "human_blocked",
+      status: "open",
+      brief: {
+        kind: "human_blocked",
+        label: "requirements",
+        lens: "requirements and ambiguity gaps",
+        summary: "Question pending.",
+        recommendedDirection: "Answer the pending question.",
+        risks: [],
+        questions: ["What is the target platform?"]
+      },
+      createdAt: "2026-04-28T10:00:02.000Z",
+      updatedAt: "2026-04-28T10:00:02.000Z"
+    });
+
+    repo.clearEscalations("wf_1");
+
+    expect(repo.findWorkflowRunById("wf_1")).toMatchObject({
+      id: "wf_1",
+      status: "partially_blocked"
+    });
+    expect(repo.findChildSessions("wf_1")).toEqual([
+      expect.objectContaining({
+        sessionId: "sess_1",
+        state: "human_blocked"
+      })
+    ]);
+    expect(repo.findEscalations("wf_1")).toEqual([]);
   });
 
   it("rejects child sessions without a real run, with a run from another session, and escalations without a matching child session", () => {
