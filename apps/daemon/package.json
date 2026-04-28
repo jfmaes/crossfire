@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@council/adapters": "workspace:*",
+    "@council/agent-workflows": "workspace:*",
     "@council/core": "workspace:*",
     "@council/storage": "workspace:*",
     "fastify": "^5.6.1",

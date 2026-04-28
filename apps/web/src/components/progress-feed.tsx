@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getRunEvents, type ProgressEventMetadata } from "../lib/api";
+import { deriveMilestones } from "./progress-milestones";
 
 interface ProgressEvent {
   sessionId: string;
@@ -319,6 +320,22 @@ export function ProgressFeed({
           message: pendingState.detail
         } as TimedProgressEvent]
       : [];
+  const milestones = deriveMilestones(visibleEvents.map((event) => ({
+    id: String(event.id),
+    runId: event.runId ?? "",
+    sessionId: event.sessionId,
+    type: event.type,
+    message: event.message,
+    model: event.model ?? null,
+    phase: event.phase ?? null,
+    turnNumber: event.turnNumber ?? null,
+    elapsedMs: event.elapsedMs ?? null,
+    disagreements: event.disagreements ?? null,
+    metadata: event.metadata ?? null,
+    createdAt: new Date(event.receivedAt).toISOString()
+  })));
+  const latestMilestone = milestones.at(-1) ?? null;
+  const recentMilestones = milestones.slice(-5).reverse();
 
   useEffect(() => {
     if (visibleEvents.length > prevEventCount.current && logRef.current) {
@@ -343,15 +360,20 @@ export function ProgressFeed({
           {active.length > 0 && <span className="progress-feed__live-dot" />}
           Live progress
         </h3>
-        {(active.length > 0 || pendingState) && (
+        {(active.length > 0 || (pendingState && milestones.length === 0)) && (
           <span className="progress-feed__badge">
             {active.length > 0 ? `${active.length} active` : "starting"}
           </span>
         )}
       </div>
 
-      {(active.length > 0 || pendingState) && (
+      {(active.length > 0 || pendingState || latestMilestone) && (
         <div className="progress-feed__active">
+          {latestMilestone && (
+            <div className="progress-feed__milestone">
+              <div className="progress-feed__milestone-title">{latestMilestone.text}</div>
+            </div>
+          )}
           {active.map((item) => (
             <div key={item.key} className={`progress-feed__active-card progress-feed__active-card--${item.model}`}>
               <div className="progress-feed__active-top">
@@ -370,7 +392,7 @@ export function ProgressFeed({
               </div>
             </div>
           ))}
-          {active.length === 0 && pendingState && (
+          {active.length === 0 && pendingState && milestones.length === 0 && (
             <div className="progress-feed__active-card progress-feed__active-card--pending">
               <div className="progress-feed__active-top">
                 <span className="progress-feed__model progress-feed__model--pending">SYSTEM</span>
@@ -384,6 +406,28 @@ export function ProgressFeed({
               <div className="progress-feed__active-body">
                 {pendingState.detail}
               </div>
+            </div>
+          )}
+          {recentMilestones.length > 0 && (
+            <div className="progress-feed__milestones">
+              <div className="progress-feed__milestones-heading">Recent milestones</div>
+              {recentMilestones.map((milestone) => (
+                <div key={milestone.id} className="progress-feed__milestone-row">
+                  <span className="progress-feed__milestone-time">
+                    {new Date(milestone.createdAt).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit"
+                    })}
+                  </span>
+                  {milestone.model && (
+                    <span className={`progress-feed__model progress-feed__model--${milestone.model}`}>
+                      {milestone.model.toUpperCase()}
+                    </span>
+                  )}
+                  <span className="progress-feed__milestone-text">{milestone.text}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>

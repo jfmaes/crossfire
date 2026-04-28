@@ -77,6 +77,33 @@ interface WalkthroughGap {
   fix: string;
 }
 
+interface RevisionDocumentReferenceTrace {
+  totalSections: number;
+  referencedSections: number;
+  sectionTitles: string[];
+  sectionsWithTruncatedExcerpts: Array<{
+    title: string;
+    omittedChars: number;
+  }>;
+  totalExcerptChars: number;
+  totalOmittedChars: number;
+}
+
+interface RevisionInputShapingTrace {
+  applied: boolean;
+  originalChars: number;
+  finalChars: number;
+  hardBudgetGapReportSynthesized: boolean;
+  softBudgetApplied: boolean;
+  softBudgetChars: number | null;
+  softBudgetGapReportSynthesized: boolean;
+  softBudgetCompactRevisionBriefApplied: boolean;
+  softBudgetSectionTitleIndexApplied: boolean;
+  finalGapReportMode: "raw" | "synthesized";
+  specReferenceTrace: RevisionDocumentReferenceTrace | null;
+  planReferenceTrace: RevisionDocumentReferenceTrace | null;
+}
+
 interface SpecGenerationResult {
   spec: string;
   implementationPlan: string;
@@ -91,6 +118,7 @@ interface SpecGenerationResult {
     revision?: TurnTrace;
     revisedAfterWalkthrough: boolean;
     revisionInputSynthesized: boolean;
+    revisionInputShaping: RevisionInputShapingTrace;
     gapCount: number;
     freshContext: {
       draft: boolean;
@@ -103,6 +131,11 @@ interface SpecGenerationResult {
     usedCanonicalApproachHandoff: boolean;
     authorityPathUncompressed: boolean;
     authorityPathUncompacted: boolean;
+    degradedOutputRetry: {
+      attempted: boolean;
+      reason: "degraded_structured_output" | null;
+      succeeded: boolean;
+    };
     compaction: {
       approachResult: boolean;
       peerDraft: boolean;
@@ -154,18 +187,54 @@ interface PromptLedgerEntry {
   viaConversationReuse: boolean;
 }
 
-interface CompactionMetadata {
-  component: string;
-  originalChars: number;
-  finalChars: number;
-  sectionsCompacted: string[];
-}
-
 interface TurnTrace {
   outputStatus: "ok" | "degraded" | "phase_invalid";
   missingFields: string[];
   conversationReused: boolean;
   promptLedger: PromptLedgerEntry[];
+}
+
+export interface SpecGenerationFailureDiagnostics {
+  phase: "spec_generation";
+  provider: "claude";
+  substep: "revision";
+  outputStatus: "degraded" | "phase_invalid";
+  missingFields: string[];
+  degradedOutputRetry?: {
+    attempted: boolean;
+    reason: "degraded_structured_output";
+    succeeded: boolean;
+  };
+  rawResponsePreview: string;
+  promptLedgerSizes: {
+    originalProblem: number;
+    interviewResults: number;
+    finalApproachHandoff: number;
+    revisionPeerDraft: number;
+  };
+  revisionPeerDraftChars: number;
+}
+
+export class SpecGenerationDiagnosticsError extends Error {
+  constructor(
+    message: string,
+    public readonly diagnostics: SpecGenerationFailureDiagnostics
+  ) {
+    super(message);
+    this.name = "SpecGenerationDiagnosticsError";
+  }
+}
+
+interface InvalidTurnOutputDetails {
+  model: "gpt" | "claude";
+  phase: PhaseValidationPhase;
+  outputStatus: TurnTrace["outputStatus"];
+  missingFields: string[];
+  conversationReused: boolean;
+  promptLedger: PromptLedgerEntry[];
+  rawText: string;
+  rawResponse: string;
+  parsed: Record<string, unknown> | null;
 }
 
 class AuthorityInputTooLargeError extends Error {
@@ -180,9 +249,28 @@ class AuthorityInputTooLargeError extends Error {
   }
 }
 
+class GapSynthesisCoverageError extends Error {
+  constructor(
+    public readonly missingGapNumbers: number[],
+    public readonly synthesizedGapReport: string
+  ) {
+    super(`gap_synthesis_coverage_incomplete: missing original gap coverage for ${missingGapNumbers.join(", ")}`);
+    this.name = "GapSynthesisCoverageError";
+  }
+}
+
 const FINAL_APPROACH_HANDOFF_BUDGET_CHARS = 100_000;
 const SPEC_GENERATION_DRAFT_BUDGET_CHARS = 250_000;
 const REVISION_INPUT_BUDGET_CHARS = 250_000;
+const CLAUDE_REVISION_SOFT_BUDGET_CHARS = 45_000;
+const SOFT_GAP_SYNTHESIS_TRIGGER_CHARS = 8_000;
+const SOFT_GAP_SYNTHESIS_TARGET_CHARS = 6_000;
+const RAW_RESPONSE_PREVIEW_MAX_CHARS = 1_200;
+const SPEC_GENERATION_RECOVERY_INSTRUCTION = [
+  "Recovery retry: previous response was rejected because it was not a valid raw JSON object.",
+  "do not explain.",
+  "output one raw JSON object only."
+].join("\n");
 
 function extractJsonFromText(text: string): Record<string, unknown> | null {
   // Try direct parse first
@@ -214,6 +302,7 @@ async function collectTurnOutput(
     prompt: string;
     phase: PhaseValidationPhase;
     promptLedger?: PromptLedgerEntry[];
+    invalidOutputErrorFactory?: (details: InvalidTurnOutputDetails) => Error;
   }
 ): Promise<{ rawText: string; parsed: Record<string, unknown> | null; trace: TurnTrace }> {
   const model = provider.name as "gpt" | "claude";
@@ -364,7 +453,19 @@ async function collectTurnOutput(
   });
 
   if (outputStatus !== "ok") {
-    throw new Error(`${model.toUpperCase()} ${input.phase} failed: ${outputStatus === "degraded" ? "degraded structured output" : `missing required fields: ${missingFields.join(", ")}`}`);
+    const details: InvalidTurnOutputDetails = {
+      model,
+      phase: input.phase,
+      outputStatus,
+      missingFields,
+      conversationReused,
+      promptLedger: input.promptLedger ?? [],
+      rawText,
+      rawResponse,
+      parsed
+    };
+    throw input.invalidOutputErrorFactory?.(details)
+      ?? new Error(buildInvalidTurnOutputMessage(details));
   }
 
   return {
@@ -386,10 +487,15 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
   });
 
   return {
-    async runDualAnalysis(sessionId: string, prompt: string, runId?: string): Promise<AnalysisResult> {
+    async runDualAnalysis(
+      sessionId: string,
+      prompt: string,
+      runId?: string,
+      mode?: "new_spec" | "existing_spec"
+    ): Promise<AnalysisResult> {
       emitProgress({ sessionId, runId, type: "phase_start", phase: "analysis", message: "Phase 1: Dual Analysis (GPT + Claude in parallel)" });
-      const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt });
-      const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt });
+      const gptPrompt = buildAnalysisPrompt({ role: "gpt", originalProblem: prompt, mode });
+      const claudePrompt = buildAnalysisPrompt({ role: "claude", originalProblem: prompt, mode });
       const analysisLedger = [
         makePromptLedgerEntry("originalProblem", prompt)
       ];
@@ -663,7 +769,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       prompt: string,
       interviewResults: Array<{ question: string; answer: string }>,
       finalApproachHandoff: string,
-      runId?: string
+      runId?: string,
+      mode?: "new_spec" | "existing_spec"
     ): Promise<SpecGenerationResult> {
       // Step 1: GPT drafts, Claude reviews — sequential so Claude can critique GPT's work.
       emitProgress({ sessionId, runId, type: "phase_start", phase: "spec_generation", message: "Spec Generation (GPT drafts → Claude reviews → both walkthrough → Claude revises)" });
@@ -682,7 +789,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         role: "gpt",
         originalProblem: prompt,
         interviewResults,
-        approachResult: finalApproachHandoff
+        approachResult: finalApproachHandoff,
+        mode
       });
       const draftLedger = [
         makePromptLedgerEntry("originalProblem", prompt),
@@ -726,7 +834,8 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
         originalProblem: prompt,
         interviewResults,
         approachResult: finalApproachHandoff,
-        peerDraft
+        peerDraft,
+        mode
       });
       const reviewLedger = [
         makePromptLedgerEntry("originalProblem", prompt),
@@ -805,19 +914,26 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
       let revisionTrace: TurnTrace | undefined;
       let gapSynthesisTrace: TurnTrace | undefined;
       let revisionInputSynthesized = false;
+      let revisionInputShaping = createRevisionInputShapingTrace();
+      const degradedOutputRetry: SpecGenerationResult["trace"]["degradedOutputRetry"] = {
+        attempted: false,
+        reason: null,
+        succeeded: false
+      };
 
       if (allGaps.length > 0) {
         emitProgress({ sessionId, runId, type: "info", phase: "spec_generation", message: `${allGaps.length} operational gap(s) found — Claude revising spec` });
 
         const gapReport = formatWalkthroughGapReport(allGaps);
+        let revisionGapReport = gapReport;
         let revisionPeerDraft = buildRevisionPeerDraft({
           reviewedSpec,
           reviewedPlan,
-          gapReport,
+          gapReport: revisionGapReport,
           synthesized: false
         });
-
-        if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
+        revisionInputShaping = createRevisionInputShapingTrace(revisionPeerDraft.length);
+        const synthesizeRevisionGapReport = async (targetChars: number, reason: "hard_budget" | "soft_budget") => {
           emitProgress({
             sessionId,
             runId,
@@ -827,19 +943,26 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               authorityInput: {
                 component: "revisionPeerDraft",
                 actualChars: revisionPeerDraft.length,
-                budgetChars: REVISION_INPUT_BUDGET_CHARS
+                budgetChars: reason === "hard_budget"
+                  ? REVISION_INPUT_BUDGET_CHARS
+                  : CLAUDE_REVISION_SOFT_BUDGET_CHARS
               },
               gapSynthesis: {
                 originalGapCount: allGaps.length,
-                originalChars: gapReport.length
+                originalChars: gapReport.length,
+                targetChars,
+                reason
               }
             },
-            message: `revision input exceeds ${REVISION_INPUT_BUDGET_CHARS} chars; synthesizing walkthrough gaps`
+            message: reason === "hard_budget"
+              ? `revision input exceeds ${REVISION_INPUT_BUDGET_CHARS} chars; synthesizing walkthrough gaps`
+              : `Claude revision input exceeds the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; synthesizing walkthrough gaps`
           });
 
           const synthesisPrompt = buildGapSynthesisPrompt({
             originalProblem: prompt,
-            gaps: allGaps
+            gaps: allGaps,
+            targetChars
           });
           const synthesisResult = await collectTurnOutput(input.claude, {
             sessionId,
@@ -853,13 +976,50 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           });
           gapSynthesisTrace = synthesisResult.trace;
           const synthesizedGapReport = extractGapSynthesisBrief(synthesisResult, gapReport);
+          const coverageCheck = verifySynthesizedGapCoverage(synthesizedGapReport, allGaps.length);
+          if (!coverageCheck.complete) {
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              phase: "gap_synthesis",
+              metadata: {
+                blockedReason: "gap_synthesis_coverage_incomplete",
+                gapSynthesis: {
+                  reason,
+                  originalGapCount: allGaps.length,
+                  coveredGapCount: coverageCheck.coveredGapNumbers.length,
+                  missingGapNumbers: coverageCheck.missingGapNumbers
+                }
+              },
+              message: `Synthesized walkthrough gap brief omitted coverage for ${coverageCheck.missingGapNumbers.length} original gap(s)`
+            });
+
+            throw new GapSynthesisCoverageError(
+              coverageCheck.missingGapNumbers,
+              synthesizedGapReport
+            );
+          }
+          revisionGapReport = synthesizedGapReport;
           revisionPeerDraft = buildRevisionPeerDraft({
             reviewedSpec,
             reviewedPlan,
-            gapReport: synthesizedGapReport,
+            gapReport: revisionGapReport,
             synthesized: true
           });
           revisionInputSynthesized = true;
+
+          if (reason === "hard_budget") {
+            revisionInputShaping.hardBudgetGapReportSynthesized = true;
+          } else {
+            revisionInputShaping.softBudgetApplied = true;
+            revisionInputShaping.softBudgetChars = CLAUDE_REVISION_SOFT_BUDGET_CHARS;
+            revisionInputShaping.softBudgetGapReportSynthesized = true;
+          }
+
+          revisionInputShaping.applied = true;
+          revisionInputShaping.finalGapReportMode = "synthesized";
+          revisionInputShaping.finalChars = revisionPeerDraft.length;
 
           emitProgress({
             sessionId,
@@ -870,11 +1030,62 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
               gapSynthesis: {
                 originalGapCount: allGaps.length,
                 originalChars: gapReport.length,
-                finalChars: synthesizedGapReport.length
+                finalChars: synthesizedGapReport.length,
+                targetChars,
+                reason
               }
             },
             message: `Synthesized ${allGaps.length} walkthrough gap(s) into ${synthesizedGapReport.length} chars`
           });
+        };
+
+        if (revisionPeerDraft.length > REVISION_INPUT_BUDGET_CHARS) {
+          await synthesizeRevisionGapReport(12_000, "hard_budget");
+        }
+
+        if (revisionPeerDraft.length > CLAUDE_REVISION_SOFT_BUDGET_CHARS) {
+          if (
+            !revisionInputShaping.softBudgetGapReportSynthesized
+            && revisionGapReport.length > SOFT_GAP_SYNTHESIS_TRIGGER_CHARS
+          ) {
+            await synthesizeRevisionGapReport(SOFT_GAP_SYNTHESIS_TARGET_CHARS, "soft_budget");
+          }
+        }
+
+        if (revisionPeerDraft.length > CLAUDE_REVISION_SOFT_BUDGET_CHARS) {
+          const compactedRevisionInput = buildSoftBudgetRevisionBrief({
+            reviewedSpec,
+            reviewedPlan,
+            gapReport: revisionGapReport,
+            synthesized: revisionInputShaping.finalGapReportMode === "synthesized",
+            targetChars: CLAUDE_REVISION_SOFT_BUDGET_CHARS
+          });
+
+          if (compactedRevisionInput.applied) {
+            revisionPeerDraft = compactedRevisionInput.revisionPeerDraft;
+            revisionInputSynthesized = true;
+            revisionInputShaping.applied = true;
+            revisionInputShaping.softBudgetApplied = true;
+            revisionInputShaping.softBudgetChars = CLAUDE_REVISION_SOFT_BUDGET_CHARS;
+            revisionInputShaping.softBudgetCompactRevisionBriefApplied =
+              compactedRevisionInput.strategy === "section_reference_excerpt";
+            revisionInputShaping.softBudgetSectionTitleIndexApplied =
+              compactedRevisionInput.strategy === "section_title_index";
+            revisionInputShaping.finalChars = revisionPeerDraft.length;
+            revisionInputShaping.specReferenceTrace = compactedRevisionInput.specReferenceTrace;
+            revisionInputShaping.planReferenceTrace = compactedRevisionInput.planReferenceTrace;
+
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              phase: "spec_generation",
+              metadata: {
+                revisionInputShaping
+              },
+              message: `Claude revision input exceeded the ${CLAUDE_REVISION_SOFT_BUDGET_CHARS}-char soft budget; replaced full drafts with an authority-safe revision brief`
+            });
+          }
         }
 
         ensureAuthorityInputFits({
@@ -893,21 +1104,88 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           originalProblem: prompt,
           interviewResults,
           approachResult: finalApproachHandoff,
-          peerDraft: revisionPeerDraft
+          peerDraft: revisionPeerDraft,
+          mode
         });
+        const revisionPromptLedger = [
+          makePromptLedgerEntry("originalProblem", prompt),
+          makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
+          approachLedgerEntry,
+          revisionPeerDraftLedgerEntry
+        ];
 
-        const revisionResult = await collectTurnOutput(input.claude, {
+        const collectRevisionResult = (revisionAttemptPrompt: string) => collectTurnOutput(input.claude, {
           sessionId,
           runId,
-          prompt: revisionPrompt,
+          prompt: revisionAttemptPrompt,
           phase: "spec_generation",
-          promptLedger: [
-            makePromptLedgerEntry("originalProblem", prompt),
-            makePromptLedgerEntry("interviewResults", interviewResults.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")),
-            approachLedgerEntry,
-            revisionPeerDraftLedgerEntry
-          ]
+          promptLedger: revisionPromptLedger,
+          invalidOutputErrorFactory: (details) => {
+            const shouldAttachDiagnostics =
+              details.outputStatus === "degraded"
+              || (details.outputStatus === "phase_invalid" && degradedOutputRetry.attempted);
+
+            if (!shouldAttachDiagnostics) {
+              return new Error(buildInvalidTurnOutputMessage(details));
+            }
+
+            const diagnostics = buildSpecGenerationFailureDiagnostics({
+              outputStatus: details.outputStatus as SpecGenerationFailureDiagnostics["outputStatus"],
+              promptLedger: revisionPromptLedger,
+              rawResponse: details.rawResponse || details.rawText,
+              missingFields: details.missingFields,
+              revisionPeerDraftChars: revisionPeerDraft.length,
+              degradedOutputRetry
+            });
+
+            emitProgress({
+              sessionId,
+              runId,
+              type: "info",
+              model: "claude",
+              phase: "spec_generation",
+              metadata: diagnostics as unknown as Record<string, unknown>,
+              message: details.outputStatus === "degraded"
+                ? "Claude spec revision returned degraded structured output"
+                : "Claude spec revision retry returned phase-invalid structured output"
+            });
+
+            return new SpecGenerationDiagnosticsError(
+              buildInvalidTurnOutputMessage(details),
+              diagnostics
+            );
+          }
         });
+
+        let revisionResult;
+        try {
+          revisionResult = await collectRevisionResult(revisionPrompt);
+        } catch (error) {
+          if (!isSpecGenerationDiagnosticsError(error)) {
+            throw error;
+          }
+
+          degradedOutputRetry.attempted = true;
+          degradedOutputRetry.reason = "degraded_structured_output";
+
+          emitProgress({
+            sessionId,
+            runId,
+            type: "info",
+            model: "claude",
+            phase: "spec_generation",
+            metadata: {
+              retryAttempted: true,
+              retryReason: degradedOutputRetry.reason
+            },
+            message: "Retrying Claude spec revision once with fresh recovery instructions"
+          });
+
+          revisionResult = await collectRevisionResult(
+            buildSpecGenerationRecoveryPrompt(revisionPrompt)
+          );
+          degradedOutputRetry.succeeded = true;
+        }
         revisionTrace = revisionResult.trace;
 
         finalSpec =
@@ -939,6 +1217,7 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           revision: revisionTrace,
           revisedAfterWalkthrough: allGaps.length > 0,
           revisionInputSynthesized,
+          revisionInputShaping,
           gapCount: allGaps.length,
           freshContext: {
             draft: true,
@@ -950,11 +1229,12 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
           canonicalApproachHandoff: true,
           usedCanonicalApproachHandoff: true,
           authorityPathUncompressed: true,
-          authorityPathUncompacted: true,
+          authorityPathUncompacted: !revisionInputShaping.applied,
+          degradedOutputRetry,
           compaction: {
             approachResult: false,
             peerDraft: false,
-            revisionPeerDraft: false
+            revisionPeerDraft: revisionInputShaping.applied
           }
         }
       };
@@ -1189,6 +1469,10 @@ export function createPhaseOrchestrator(input: PhaseOrchestratorInput) {
   };
 }
 
+export function isSpecGenerationDiagnosticsError(error: unknown): error is SpecGenerationDiagnosticsError {
+  return error instanceof SpecGenerationDiagnosticsError;
+}
+
 function toFeedbackChunkMetadata(chunk: FeedbackChunk): Record<string, unknown> {
   return {
     id: chunk.id,
@@ -1248,104 +1532,345 @@ function makePromptLedgerEntry(
   };
 }
 
-function emitCompactionProgress(input: {
-  sessionId: string;
-  runId?: string;
-  phase: PhaseValidationPhase;
-  component: string;
-  promptLedgerEntry: PromptLedgerEntry;
-  compaction: CompactionMetadata;
-  message: string;
-}) {
-  emitProgress({
-    sessionId: input.sessionId,
-    runId: input.runId,
-    type: "info",
-    phase: input.phase,
-    metadata: {
-      compacted: true,
-      component: input.component,
-      promptLedger: [input.promptLedgerEntry],
-      compaction: input.compaction
-    },
-    message: input.message
-  });
+function createRevisionInputShapingTrace(originalChars = 0): RevisionInputShapingTrace {
+  return {
+    applied: false,
+    originalChars,
+    finalChars: originalChars,
+    hardBudgetGapReportSynthesized: false,
+    softBudgetApplied: false,
+    softBudgetChars: null,
+    softBudgetGapReportSynthesized: false,
+    softBudgetCompactRevisionBriefApplied: false,
+    softBudgetSectionTitleIndexApplied: false,
+    finalGapReportMode: "raw",
+    specReferenceTrace: null,
+    planReferenceTrace: null
+  };
 }
 
-function compactMarkdown(text: string, budgetChars: number): {
-  text: string;
-  compacted: boolean;
-  sectionsCompacted: string[];
-} {
-  if (text.length <= budgetChars) {
-    return { text, compacted: false, sectionsCompacted: [] };
+function splitMarkdownIntoSections(text: string): Array<{ title: string; content: string }> {
+  const matches = Array.from(text.matchAll(/^#{1,6}\s.+$/gm));
+  if (matches.length === 0) {
+    const body = text.trim();
+    return body ? [{ title: "Document body", content: body }] : [];
   }
 
-  const keySectionPattern = /\b(tasks?|acceptance criteria|risks?|open questions?|dependencies)\b/i;
-  const sections = text.split(/(?=^#{1,2}\s)/m);
-  const sectionsCompacted: string[] = [];
-  const compactedSections = sections.map((section) => {
-    const lines = section.split("\n");
-    const header = lines[0] ?? "";
-    const bodyLines = lines.slice(1);
-    const isKeySection = keySectionPattern.test(header);
+  const sections: Array<{ title: string; content: string }> = [];
+  const firstHeadingIndex = matches[0]?.index ?? 0;
+  if (firstHeadingIndex > 0) {
+    const preamble = text.slice(0, firstHeadingIndex).trim();
+    if (preamble) {
+      sections.push({ title: "Document preamble", content: preamble });
+    }
+  }
 
-    if (isKeySection) {
-      sectionsCompacted.push(header || "unlabeled section");
-      const kept = bodyLines
-        .filter((line) => /^(\s*[-*]|\s*\d+\.)/.test(line) || line.trim() === "")
-        .map((line) => line.length > 160 ? `${line.slice(0, 157)}...` : line);
-      return [header, ...kept].join("\n").trim();
+  for (let index = 0; index < matches.length; index += 1) {
+    const start = matches[index]?.index ?? 0;
+    const end = matches[index + 1]?.index ?? text.length;
+    const content = text.slice(start, end).trim();
+    if (!content) {
+      continue;
     }
 
-    const paragraphLines: string[] = [];
-    let inCodeBlock = false;
-    let codeBlock: string[] = [];
+    sections.push({
+      title: matches[index]?.[0].trim() ?? `Section ${index + 1}`,
+      content
+    });
+  }
 
-    for (const line of bodyLines) {
-      if (line.trim().startsWith("```")) {
-        if (!inCodeBlock) {
-          inCodeBlock = true;
-          codeBlock = [line];
-          continue;
-        }
-        codeBlock.push(line);
-        if (codeBlock.length <= 22) {
-          paragraphLines.push(...codeBlock);
-        } else {
-          paragraphLines.push("[long code block omitted during compaction]");
-        }
-        break;
-      }
+  return sections;
+}
 
-      if (inCodeBlock) {
-        codeBlock.push(line);
+function buildDocumentReferenceBrief(input: {
+  documentLabel: "Specification" | "Implementation Plan";
+  text: string;
+  excerptCharsPerSection: number;
+}): {
+  text: string;
+  trace: RevisionDocumentReferenceTrace;
+} {
+  const sections = splitMarkdownIntoSections(input.text);
+  const sectionTitles = sections.map((section) => section.title);
+  const sectionsWithTruncatedExcerpts: RevisionDocumentReferenceTrace["sectionsWithTruncatedExcerpts"] = [];
+  let totalExcerptChars = 0;
+  let totalOmittedChars = 0;
+
+  const lines = [
+    `# ${input.documentLabel} Authority References`,
+    "",
+    `Every section title below is exact. Each excerpt is verbatim from the authoritative reviewed draft.`
+  ];
+
+  for (const [index, section] of sections.entries()) {
+    const excerpt = section.content.slice(0, input.excerptCharsPerSection).trimEnd();
+    const omittedChars = Math.max(0, section.content.length - excerpt.length);
+    totalExcerptChars += excerpt.length;
+    totalOmittedChars += omittedChars;
+
+    lines.push("", `## Ref ${index + 1}: ${section.title}`);
+    if (excerpt.length > 0) {
+      lines.push(excerpt);
+    } else {
+      lines.push("[No verbatim excerpt retained for this section in the soft-budget brief.]");
+    }
+
+    if (omittedChars > 0) {
+      lines.push(`[Section excerpt truncated: ${omittedChars} chars omitted from this authoritative section.]`);
+      sectionsWithTruncatedExcerpts.push({
+        title: section.title,
+        omittedChars
+      });
+    }
+  }
+
+  lines.push(
+    "",
+    `[${input.documentLabel} brief metadata: ${sections.length} section reference(s), ${totalExcerptChars} verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
+  );
+
+  return {
+    text: lines.join("\n"),
+    trace: {
+      totalSections: sections.length,
+      referencedSections: sections.length,
+      sectionTitles,
+      sectionsWithTruncatedExcerpts,
+      totalExcerptChars,
+      totalOmittedChars
+    }
+  };
+}
+
+function buildDocumentSectionTitleIndexBrief(input: {
+  documentLabel: "Specification" | "Implementation Plan";
+  text: string;
+}): {
+  text: string;
+  trace: RevisionDocumentReferenceTrace;
+} {
+  const sections = splitMarkdownIntoSections(input.text);
+  const sectionTitles = sections.map((section) => section.title);
+  const anchorIndices = pickSectionAnchorIndices(sections.length);
+  const anchorIndexSet = new Set(anchorIndices);
+  const sectionsWithTruncatedExcerpts: RevisionDocumentReferenceTrace["sectionsWithTruncatedExcerpts"] = [];
+  let totalExcerptChars = 0;
+  let totalOmittedChars = 0;
+  const lines = [
+    `# ${input.documentLabel} Authority Section Index`,
+    "",
+    "Every section title below is exact.",
+    "The exact body anchors below are verbatim excerpts from selected authoritative sections.",
+    "All remaining omitted content is tracked explicitly in metadata."
+  ];
+
+  if (sections.length === 0) {
+    lines.push("", "[No authored sections were detected in the authoritative draft.]");
+  } else {
+    lines.push("", "## Exact Section Titles", "");
+    lines.push(...sectionTitles.map((title, index) => `${index + 1}. ${title}`));
+    lines.push("", "## Exact Body Anchors", "");
+
+    for (const anchorIndex of anchorIndices) {
+      const section = sections[anchorIndex];
+      if (!section) {
         continue;
       }
 
-      if (paragraphLines.length > 0 && line.trim() === "") {
-        break;
-      }
+      const bodyText = extractSectionBodyText(section.content);
+      const excerptSource = bodyText || section.content;
+      const excerpt = excerptSource.slice(0, 48).trimEnd();
+      const omittedChars = Math.max(0, excerptSource.length - excerpt.length);
+      totalExcerptChars += excerpt.length;
+      totalOmittedChars += omittedChars;
 
-      if (paragraphLines.length > 0 || line.trim() !== "") {
-        paragraphLines.push(line);
+      lines.push(`### Anchor ${anchorIndex + 1}: ${section.title}`);
+      lines.push(excerpt || "[No verbatim body content available for this section anchor.]");
+      if (omittedChars > 0) {
+        lines.push(`[Anchor excerpt truncated: ${omittedChars} chars omitted from this authoritative section.]`);
       }
+      lines.push("");
+      sectionsWithTruncatedExcerpts.push({
+        title: section.title,
+        omittedChars
+      });
     }
-
-    return [header, ...paragraphLines].join("\n").trim();
-  });
-
-  let compactedText = compactedSections.filter(Boolean).join("\n\n");
-  const footer = `\n\n[Compacted from ${text.length} chars to ${Math.min(compactedText.length, budgetChars)} chars. Lower-priority details omitted.]`;
-
-  if (compactedText.length + footer.length > budgetChars) {
-    compactedText = compactedText.slice(0, Math.max(0, budgetChars - footer.length - 3)).trimEnd() + "...";
   }
 
+  for (const [index, section] of sections.entries()) {
+    if (anchorIndexSet.has(index)) {
+      continue;
+    }
+
+    totalOmittedChars += extractSectionBodyText(section.content).length || section.content.length;
+    sectionsWithTruncatedExcerpts.push({
+      title: section.title,
+      omittedChars: extractSectionBodyText(section.content).length || section.content.length
+    });
+  }
+
+  lines.push(
+    "",
+    `[${input.documentLabel} brief metadata: ${sections.length} exact section title reference(s), ${totalExcerptChars} verbatim chars retained, ${totalOmittedChars} chars omitted explicitly.]`
+  );
+
   return {
-    text: `${compactedText}${footer}`,
-    compacted: true,
-    sectionsCompacted
+    text: lines.join("\n"),
+    trace: {
+      totalSections: sections.length,
+      referencedSections: sections.length,
+      sectionTitles,
+      sectionsWithTruncatedExcerpts,
+      totalExcerptChars,
+      totalOmittedChars
+    }
+  };
+}
+
+function buildSoftBudgetRevisionBrief(input: {
+  reviewedSpec: string;
+  reviewedPlan: string;
+  gapReport: string;
+  synthesized: boolean;
+  targetChars: number;
+}): {
+  revisionPeerDraft: string;
+  applied: boolean;
+  strategy: "section_reference_excerpt" | "section_title_index" | null;
+  specReferenceTrace: RevisionDocumentReferenceTrace;
+  planReferenceTrace: RevisionDocumentReferenceTrace;
+} {
+  const originalRevisionPeerDraft = buildRevisionPeerDraft({
+    reviewedSpec: input.reviewedSpec,
+    reviewedPlan: input.reviewedPlan,
+    gapReport: input.gapReport,
+    synthesized: input.synthesized
+  });
+
+  const originalSpecSections = splitMarkdownIntoSections(input.reviewedSpec);
+  const originalPlanSections = splitMarkdownIntoSections(input.reviewedPlan);
+  const fallbackSpecTrace: RevisionDocumentReferenceTrace = {
+    totalSections: originalSpecSections.length,
+    referencedSections: originalSpecSections.length,
+    sectionTitles: originalSpecSections.map((section) => section.title),
+    sectionsWithTruncatedExcerpts: [],
+    totalExcerptChars: input.reviewedSpec.length,
+    totalOmittedChars: 0
+  };
+  const fallbackPlanTrace: RevisionDocumentReferenceTrace = {
+    totalSections: originalPlanSections.length,
+    referencedSections: originalPlanSections.length,
+    sectionTitles: originalPlanSections.map((section) => section.title),
+    sectionsWithTruncatedExcerpts: [],
+    totalExcerptChars: input.reviewedPlan.length,
+    totalOmittedChars: 0
+  };
+
+  if (originalRevisionPeerDraft.length <= input.targetChars) {
+    return {
+      revisionPeerDraft: originalRevisionPeerDraft,
+      applied: false,
+      strategy: null,
+      specReferenceTrace: fallbackSpecTrace,
+      planReferenceTrace: fallbackPlanTrace
+    };
+  }
+
+  const requiredOutputSections = [
+    "# Required Output Sections",
+    "",
+    "Specification must preserve or update: Goal and non-goals, Architecture, Tech Stack, Key design decisions, Acceptance criteria, Risks and mitigations.",
+    "Implementation plan must preserve or update: Tasks, Tests-first guidance, Files to modify, Done-when criteria, Complexity estimates, Dependencies, Sprint groupings."
+  ].join("\n");
+
+  const buildCandidate = (specExcerptChars: number, planExcerptChars: number) => {
+    const specBrief = buildDocumentReferenceBrief({
+      documentLabel: "Specification",
+      text: input.reviewedSpec,
+      excerptCharsPerSection: specExcerptChars
+    });
+    const planBrief = buildDocumentReferenceBrief({
+      documentLabel: "Implementation Plan",
+      text: input.reviewedPlan,
+      excerptCharsPerSection: planExcerptChars
+    });
+
+    const revisionPeerDraft = buildRevisionPeerDraft({
+      reviewedSpec: [
+        specBrief.text,
+        "",
+        requiredOutputSections
+      ].join("\n"),
+      reviewedPlan: planBrief.text,
+      gapReport: input.gapReport,
+      synthesized: input.synthesized
+    });
+
+    return {
+      revisionPeerDraft,
+      strategy: "section_reference_excerpt" as const,
+      specReferenceTrace: specBrief.trace,
+      planReferenceTrace: planBrief.trace
+    };
+  };
+
+  const buildSectionTitleIndexCandidate = () => {
+    const specIndex = buildDocumentSectionTitleIndexBrief({
+      documentLabel: "Specification",
+      text: input.reviewedSpec
+    });
+    const planIndex = buildDocumentSectionTitleIndexBrief({
+      documentLabel: "Implementation Plan",
+      text: input.reviewedPlan
+    });
+
+    const revisionPeerDraft = buildRevisionPeerDraft({
+      reviewedSpec: [
+        specIndex.text,
+        "",
+        requiredOutputSections
+      ].join("\n"),
+      reviewedPlan: planIndex.text,
+      gapReport: input.gapReport,
+      synthesized: input.synthesized
+    });
+
+    return {
+      revisionPeerDraft,
+      strategy: "section_title_index" as const,
+      specReferenceTrace: specIndex.trace,
+      planReferenceTrace: planIndex.trace
+    };
+  };
+
+  let specExcerptChars = 320;
+  let planExcerptChars = 240;
+  let bestExcerptCandidate = buildCandidate(specExcerptChars, planExcerptChars);
+
+  for (let attempt = 0; attempt < 6 && bestExcerptCandidate.revisionPeerDraft.length > input.targetChars; attempt += 1) {
+    specExcerptChars = Math.max(0, Math.floor(specExcerptChars * 0.6));
+    planExcerptChars = Math.max(0, Math.floor(planExcerptChars * 0.6));
+    const candidate = buildCandidate(specExcerptChars, planExcerptChars);
+    if (candidate.revisionPeerDraft.length < bestExcerptCandidate.revisionPeerDraft.length) {
+      bestExcerptCandidate = candidate;
+    }
+  }
+
+  const sectionTitleIndexCandidate = buildSectionTitleIndexCandidate();
+  const excerptShrankOriginal = bestExcerptCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length;
+  const excerptFitsTarget = bestExcerptCandidate.revisionPeerDraft.length <= input.targetChars;
+  const indexShrankOriginal = sectionTitleIndexCandidate.revisionPeerDraft.length < originalRevisionPeerDraft.length;
+  const indexFitsTarget = sectionTitleIndexCandidate.revisionPeerDraft.length <= input.targetChars;
+
+  const selectedCandidate =
+    excerptShrankOriginal && excerptFitsTarget ? bestExcerptCandidate
+    : indexShrankOriginal && indexFitsTarget ? sectionTitleIndexCandidate
+    : excerptShrankOriginal ? bestExcerptCandidate
+    : sectionTitleIndexCandidate;
+
+  return {
+    ...selectedCandidate,
+    applied: true
   };
 }
 
@@ -1433,6 +1958,73 @@ function formatWalkthroughGapReport(gaps: WalkthroughGap[]): string {
     .join("\n\n");
 }
 
+function buildInvalidTurnOutputMessage(details: InvalidTurnOutputDetails): string {
+  return `${details.model.toUpperCase()} ${details.phase} failed: ${
+    details.outputStatus === "degraded"
+      ? "degraded structured output"
+      : `missing required fields: ${details.missingFields.join(", ")}`
+  }`;
+}
+
+function buildSpecGenerationFailureDiagnostics(input: {
+  outputStatus: SpecGenerationFailureDiagnostics["outputStatus"];
+  promptLedger: PromptLedgerEntry[];
+  rawResponse: string;
+  missingFields: string[];
+  revisionPeerDraftChars: number;
+  degradedOutputRetry?: {
+    attempted: boolean;
+    reason: "degraded_structured_output" | null;
+    succeeded: boolean;
+  };
+}): SpecGenerationFailureDiagnostics {
+  const promptLedgerSizes = summarizePromptLedgerSizes(input.promptLedger);
+
+  return {
+    phase: "spec_generation",
+    provider: "claude",
+    substep: "revision",
+    outputStatus: input.outputStatus,
+    missingFields: input.missingFields,
+    ...(input.degradedOutputRetry?.attempted
+      ? {
+          degradedOutputRetry: {
+            attempted: input.degradedOutputRetry.attempted,
+            reason: "degraded_structured_output" as const,
+            succeeded: input.degradedOutputRetry.succeeded
+          }
+        }
+      : {}),
+    rawResponsePreview: capPreview(input.rawResponse, RAW_RESPONSE_PREVIEW_MAX_CHARS),
+    promptLedgerSizes: {
+      originalProblem: promptLedgerSizes.originalProblem,
+      interviewResults: promptLedgerSizes.interviewResults,
+      finalApproachHandoff: promptLedgerSizes.finalApproachHandoff,
+      revisionPeerDraft: promptLedgerSizes.revisionPeerDraft
+    },
+    revisionPeerDraftChars: input.revisionPeerDraftChars
+  };
+}
+
+function summarizePromptLedgerSizes(promptLedger: PromptLedgerEntry[]): Record<string, number> {
+  return promptLedger.reduce<Record<string, number>>((sizes, entry) => {
+    sizes[entry.name] = entry.finalChars;
+    return sizes;
+  }, {});
+}
+
+function capPreview(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return `${text.slice(0, maxChars - 1)}…`;
+}
+
+function buildSpecGenerationRecoveryPrompt(prompt: string): string {
+  return `${SPEC_GENERATION_RECOVERY_INSTRUCTION}\n\n${prompt}`;
+}
+
 function buildRevisionPeerDraft(input: {
   reviewedSpec: string;
   reviewedPlan: string;
@@ -1467,8 +2059,10 @@ function buildRevisionPeerDraft(input: {
 function buildGapSynthesisPrompt(input: {
   originalProblem: string;
   gaps: WalkthroughGap[];
+  targetChars?: number;
 }): string {
   const gapReport = formatWalkthroughGapReport(input.gaps);
+  const targetChars = input.targetChars ?? 12_000;
 
   return [
     "PHASE: WALKTHROUGH GAP SYNTHESIS",
@@ -1481,7 +2075,7 @@ function buildGapSynthesisPrompt(input: {
     "- Merge duplicates and symptoms that share the same root cause.",
     "- Keep concrete fixes, affected sections, acceptance criteria, ordering constraints, and failure/rollback behavior.",
     "- Do not include broad commentary, debate history, or generic advice.",
-    "- Target 12,000 characters or less unless preserving coverage requires slightly more.",
+    `- Target ${targetChars.toLocaleString()} characters or less unless preserving coverage requires slightly more.`,
     "",
     "Respond ONLY with a JSON object matching the normal Crossfire model-turn shape.",
     "Put the markdown repair brief in both rawText and proposedSpecDelta. Use neutral values for unrelated fields:",
@@ -1534,6 +2128,98 @@ function extractGapSynthesisBrief(
   }
 
   return fallback;
+}
+
+function verifySynthesizedGapCoverage(
+  synthesizedGapReport: string,
+  originalGapCount: number
+): {
+  complete: boolean;
+  coveredGapNumbers: number[];
+  missingGapNumbers: number[];
+} {
+  const covered = extractCoveredGapNumbers(synthesizedGapReport, originalGapCount);
+  const missingGapNumbers: number[] = [];
+  for (let gapNumber = 1; gapNumber <= originalGapCount; gapNumber += 1) {
+    if (!covered.has(gapNumber)) {
+      missingGapNumbers.push(gapNumber);
+    }
+  }
+
+  return {
+    complete: missingGapNumbers.length === 0,
+    coveredGapNumbers: [...covered].sort((a, b) => a - b),
+    missingGapNumbers
+  };
+}
+
+function extractCoveredGapNumbers(text: string, maxGapNumber: number): Set<number> {
+  const covered = new Set<number>();
+  const normalizedText = text.replace(/[–—]/g, "-");
+  const negativeCoverageCue = /\b(?:unresolved|remaining|pending|missing|omitted?|exclude(?:[sd]|ing)?|except|deferred?|not\s+covered|not\s+addressed|not\s+fixed|still\s+open|follow-?up|separate\s+fix|other than)\b/i;
+
+  for (const match of normalizedText.matchAll(/\bgaps?\b\s*:?\s*([^\n.;]*)/gi)) {
+    const segment = (match[1] ?? "").trim();
+    const positiveSegment = stripNegativeCoverageTail(segment);
+    if (!positiveSegment || negativeCoverageCue.test(positiveSegment)) {
+      continue;
+    }
+
+    for (const rangeMatch of positiveSegment.matchAll(/\b(\d+)\s*-\s*(\d+)\b/g)) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) {
+        continue;
+      }
+
+      const lower = Math.max(1, Math.min(start, end));
+      const upper = Math.min(maxGapNumber, Math.max(start, end));
+      for (let gapNumber = lower; gapNumber <= upper; gapNumber += 1) {
+        covered.add(gapNumber);
+      }
+    }
+
+    for (const singleMatch of positiveSegment.matchAll(/\b(\d+)\b/g)) {
+      const gapNumber = Number(singleMatch[1]);
+      if (Number.isInteger(gapNumber) && gapNumber >= 1 && gapNumber <= maxGapNumber) {
+        covered.add(gapNumber);
+      }
+    }
+  }
+
+  return covered;
+}
+
+function extractSectionBodyText(sectionContent: string): string {
+  const lines = sectionContent.split("\n");
+  if (lines.length <= 1) {
+    return sectionContent.trim();
+  }
+
+  const firstLine = lines[0]?.trim() ?? "";
+  if (/^#{1,6}\s.+$/.test(firstLine)) {
+    return lines.slice(1).join("\n").trim();
+  }
+
+  return sectionContent.trim();
+}
+
+function pickSectionAnchorIndices(sectionCount: number): number[] {
+  if (sectionCount <= 0) {
+    return [];
+  }
+
+  const indices = new Set<number>([0, Math.floor((sectionCount - 1) / 2), sectionCount - 1]);
+  return [...indices].sort((a, b) => a - b);
+}
+
+function stripNegativeCoverageTail(segment: string): string {
+  const contrastMatch = segment.match(/\s*(?:,|\bbut\b|\bhowever\b|\byet\b|\bwhile\b|\balthough\b|\bthough\b)\s*/i);
+  if (!contrastMatch || contrastMatch.index === undefined) {
+    return segment;
+  }
+
+  return segment.slice(0, contrastMatch.index).trim();
 }
 
 function extractWalkthroughGaps(

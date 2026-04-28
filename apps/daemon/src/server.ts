@@ -14,6 +14,15 @@ interface SessionService {
     title: string;
     prompt: string;
     executionPolicy?: { approachDebateMaxTurns?: number };
+    mode?: "new_spec" | "existing_spec";
+    existingSpec?: {
+      spec?: string;
+      specPath?: string;
+      specFileName?: string;
+      implementationPlan?: string;
+      implementationPlanPath?: string;
+      implementationPlanFileName?: string;
+    };
   }): Promise<Record<string, unknown>>;
   continueSession(input: { id: string; humanResponse: string }): Promise<Record<string, unknown> | null>;
   restartSession(id: string): Promise<Record<string, unknown> | null>;

@@ -10,13 +10,26 @@ import type {
 } from "@council/storage";
 import { collectGroundingContext } from "./grounding";
 import { writeSpecArtifact } from "./artifacts";
-import { createPhaseOrchestrator } from "./phase-orchestrator";
+import {
+  createPhaseOrchestrator,
+  isSpecGenerationDiagnosticsError
+} from "./phase-orchestrator";
 import { onProgress } from "./progress";
+import { resolveExistingSpecInput } from "./existing-spec-input";
 
 interface CreateSessionInput {
   title: string;
-  prompt: string;
+  prompt?: string;
   executionPolicy?: ExecutionPolicy;
+  mode?: "new_spec" | "existing_spec";
+  existingSpec?: {
+    spec?: string;
+    specPath?: string;
+    specFileName?: string;
+    implementationPlan?: string;
+    implementationPlanPath?: string;
+    implementationPlanFileName?: string;
+  };
 }
 
 interface SessionServiceInput {
@@ -190,6 +203,10 @@ export function createSessionService(input: SessionServiceInput) {
     return session.prompt ?? session.title;
   }
 
+  function getSessionMode(session: { executionPolicy?: ExecutionPolicy | null }) {
+    return session.executionPolicy?.mode ?? "new_spec";
+  }
+
   function buildInterviewState(sessionId: string) {
     const questions = input.repository.findInterviewQuestions(sessionId);
     const answered = questions.filter((q) => q.answer !== null);
@@ -230,6 +247,10 @@ export function createSessionService(input: SessionServiceInput) {
     } catch {
       return null;
     }
+  }
+
+  function clearSpecGenerationFailure(sessionId: string) {
+    input.repository.deletePhaseResult(sessionId, "spec_generation_failure");
   }
 
   async function buildSessionPayload(id: string): Promise<SessionServicePayload | null> {
@@ -288,7 +309,10 @@ export function createSessionService(input: SessionServiceInput) {
       recentRuns: input.repository.findRunsBySession(id),
       summary,
       interviewState: buildInterviewState(id),
-      phaseResult: session.phase ? getPhaseResult(id, session.phase) : null,
+      phaseResult: session.phase
+        ? getPhaseResult(id, session.phase)
+          ?? (session.phase === "spec_generation" ? getPhaseResult(id, "spec_generation_failure") : null)
+        : null,
       analysisResult: mergedAnalysisResult
     };
   }
@@ -502,9 +526,11 @@ export function createSessionService(input: SessionServiceInput) {
   }
 
   async function runSessionFromScratch(id: string, prompt: string, options?: { restarted?: boolean; runId?: string }) {
+    const session = input.repository.findById(id);
+    const mode = getSessionMode(session ?? {});
     let analysisResult;
     try {
-      analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt, options?.runId);
+      analysisResult = await phaseOrchestrator.runDualAnalysis(id, prompt, options?.runId, mode);
     } catch (error) {
       input.repository.updateStatus({ id, status: "errored" });
       throw error;
@@ -589,11 +615,21 @@ export function createSessionService(input: SessionServiceInput) {
   return {
     async createSession(payload: CreateSessionInput): Promise<SessionServicePayload> {
       const id = randomUUID();
-      const prompt = await buildPrompt(payload.prompt);
-      const hasGrounding = prompt.length > payload.prompt.length;
+      const rawPrompt = payload.prompt ?? "";
+      const mode = payload.mode ?? "new_spec";
+      const resolvedExistingSpec = mode === "existing_spec"
+        ? await resolveExistingSpecInput({ prompt: rawPrompt, existingSpec: payload.existingSpec })
+        : null;
+      if (mode === "existing_spec" && !resolvedExistingSpec) {
+        throw new Error("existingSpec.spec or existingSpec.specPath is required");
+      }
+      const prompt = mode === "existing_spec"
+        ? resolvedExistingSpec!.prompt
+        : await buildPrompt(rawPrompt);
+      const hasGrounding = mode === "new_spec" && prompt.length > rawPrompt.length;
       console.log(`\n━━━ New session: ${id.slice(0, 8)} ━━━`);
       console.log(`  Title: ${payload.title}`);
-      console.log(`  Prompt: ${payload.prompt.length} chars${hasGrounding ? ` (+${prompt.length - payload.prompt.length} chars grounding)` : ""}`);
+      console.log(`  Prompt: ${rawPrompt.length} chars${hasGrounding ? ` (+${prompt.length - rawPrompt.length} chars grounding)` : ""}`);
 
       input.repository.create({
         id,
@@ -601,19 +637,46 @@ export function createSessionService(input: SessionServiceInput) {
         status: "debating",
         phase: "analysis",
         prompt,
-        executionPolicy: payload.executionPolicy ?? null
+        executionPolicy: resolvedExistingSpec
+          ? {
+              ...(payload.executionPolicy ?? {}),
+              mode,
+              existingSpecSources: resolvedExistingSpec.sources
+            }
+          : payload.executionPolicy
+            ? { ...payload.executionPolicy, mode }
+            : payload.executionPolicy ?? null
       });
+      if (resolvedExistingSpec) {
+        input.repository.savePhaseResult({
+          sessionId: id,
+          phase: "existing_spec_input",
+          resultJson: JSON.stringify({
+            spec: resolvedExistingSpec.spec,
+            implementationPlan: resolvedExistingSpec.implementationPlan,
+            sources: resolvedExistingSpec.sources
+          })
+        });
+      }
       return enqueueRun({
         sessionId: id,
         kind: "create",
         phase: "analysis",
-        summary: {
-          currentUnderstanding: "Session created. Phase 1 is starting.",
-          recommendation: "Watch live progress while Crossfire runs the initial analysis and interview-question debate.",
-          changedSinceLastCheckpoint: ["Session created"],
-          openRisks: [],
-          decisionsNeeded: []
-        },
+        summary: mode === "existing_spec"
+          ? {
+              currentUnderstanding: "Existing spec review session created. Phase 1 is starting.",
+              recommendation: "Watch live progress while Crossfire reviews the supplied documents and aligns on any questions.",
+              changedSinceLastCheckpoint: ["Session created"],
+              openRisks: [],
+              decisionsNeeded: []
+            }
+          : {
+              currentUnderstanding: "Session created. Phase 1 is starting.",
+              recommendation: "Watch live progress while Crossfire runs the initial analysis and interview-question debate.",
+              changedSinceLastCheckpoint: ["Session created"],
+              openRisks: [],
+              decisionsNeeded: []
+            },
         task: async (runId) => {
           await runSessionFromScratch(id, prompt, { runId });
         }
@@ -833,6 +896,7 @@ export function createSessionService(input: SessionServiceInput) {
 
         case "spec_generation": {
           input.repository.deletePhaseResult(id, "spec_generation");
+          clearSpecGenerationFailure(id);
           await clearCurrentArtifact(id);
 
           const approachResult = getPhaseResult(id, "approach_debate") as {
@@ -878,6 +942,8 @@ export function createSessionService(input: SessionServiceInput) {
     const id = session.id;
     const phase = session.phase;
     const originalPrompt = getOriginalPrompt(session);
+    const persistedSession = input.repository.findById(id);
+    const mode = getSessionMode(persistedSession ?? {});
 
     input.repository.updateStatus({ id, status: "debating" });
 
@@ -886,7 +952,7 @@ export function createSessionService(input: SessionServiceInput) {
         // Re-run the full analysis + question debate
         let analysisResult;
         try {
-          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt, runId);
+          analysisResult = await phaseOrchestrator.runDualAnalysis(id, originalPrompt, runId, mode);
         } catch (error) {
           input.repository.updateStatus({ id, status: "errored" });
           throw error;
@@ -1342,6 +1408,7 @@ export function createSessionService(input: SessionServiceInput) {
       sessionId: id, phase: "spec_generation",
       resultJson: JSON.stringify(specResult)
     });
+    clearSpecGenerationFailure(id);
 
     let artifactPath: string | null = null;
     if (input.artifactsDirectory) {
@@ -1440,6 +1507,8 @@ export function createSessionService(input: SessionServiceInput) {
   async function advanceToSpecGeneration(id: string, originalPrompt: string, humanFeedback?: string, runId?: string) {
     input.repository.updatePhase({ id, phase: "spec_generation" });
     input.repository.updateStatus({ id, status: "debating" });
+    const session = input.repository.findById(id);
+    const mode = getSessionMode(session ?? {});
 
     const questions = input.repository.findInterviewQuestions(id);
     const interviewResults = questions
@@ -1460,9 +1529,16 @@ export function createSessionService(input: SessionServiceInput) {
     let specResult;
     try {
       specResult = await phaseOrchestrator.runSpecGeneration(
-        id, originalPrompt, interviewResults, finalApproachHandoff, runId
+        id, originalPrompt, interviewResults, finalApproachHandoff, runId, mode
       );
     } catch (error) {
+      if (isSpecGenerationDiagnosticsError(error)) {
+        input.repository.savePhaseResult({
+          sessionId: id,
+          phase: "spec_generation_failure",
+          resultJson: JSON.stringify(error.diagnostics)
+        });
+      }
       input.repository.updateStatus({ id, status: "errored" });
       throw error;
     }
@@ -1471,6 +1547,7 @@ export function createSessionService(input: SessionServiceInput) {
       sessionId: id, phase: "spec_generation",
       resultJson: JSON.stringify(specResult)
     });
+    clearSpecGenerationFailure(id);
 
     let artifactPath: string | null = null;
     if (input.artifactsDirectory) {

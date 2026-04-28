@@ -440,6 +440,43 @@ body {
   cursor: wait;
 }
 
+.mode-tabs,
+.source-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--bg-surface);
+}
+
+.mode-tabs button,
+.source-toggle button {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--ink-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mode-tabs button[aria-selected="true"],
+.source-toggle button[aria-pressed="true"] {
+  color: white;
+  background: var(--accent);
+}
+
+.existing-spec-form__section {
+  display: grid;
+  gap: 10px;
+}
+
+.existing-spec-form__error {
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
 /* ── Button loading state ── */
 
 .btn-loading {
@@ -1928,6 +1965,74 @@ body {
   font-size: 0.78rem;
   line-height: 1.55;
   color: var(--ink-secondary);
+}
+
+.progress-feed__milestone,
+.progress-feed__milestones,
+.run-detail__milestones {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--bg-surface);
+}
+
+.progress-feed__milestone {
+  grid-column: 1 / -1;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+}
+
+.progress-feed__milestone-title,
+.progress-feed__milestone-text,
+.run-detail__milestones .run-detail__event-message {
+  color: var(--ink);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.progress-feed__milestones,
+.run-detail__milestones {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.progress-feed__milestones {
+  grid-column: 1 / -1;
+}
+
+.progress-feed__milestones-heading,
+.run-detail__milestones-heading {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-secondary);
+}
+
+.progress-feed__milestone-row,
+.run-detail__milestone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.progress-feed__milestone-row + .progress-feed__milestone-row,
+.run-detail__milestone + .run-detail__milestone {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.progress-feed__milestone-time,
+.run-detail__milestones .run-detail__event-time {
+  color: var(--muted);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.progress-feed__milestone-text {
+  flex: 1;
+  min-width: 0;
 }
 
 .progress-feed__log {

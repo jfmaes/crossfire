@@ -1,17 +1,19 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
 const {
   getHealthMock,
   listSessionsMock,
-  getSessionMock
+  getSessionMock,
+  createSessionMock
 } = vi.hoisted(() => ({
   getHealthMock: vi.fn(),
   listSessionsMock: vi.fn(),
-  getSessionMock: vi.fn()
+  getSessionMock: vi.fn(),
+  createSessionMock: vi.fn()
 }));
 
 vi.mock("./lib/api", async () => {
@@ -20,7 +22,8 @@ vi.mock("./lib/api", async () => {
     ...actual,
     getHealth: getHealthMock,
     listSessions: listSessionsMock,
-    getSession: getSessionMock
+    getSession: getSessionMock,
+    createSession: createSessionMock
   };
 });
 
@@ -36,6 +39,7 @@ describe("App", () => {
     });
     listSessionsMock.mockResolvedValue([]);
     getSessionMock.mockReset();
+    createSessionMock.mockReset();
     location.hash = "";
   });
 
@@ -111,6 +115,51 @@ describe("App", () => {
     await waitFor(() => {
       expect(scrollTargets.at(-1)?.classList.contains("challenge-feedback-submit")).toBe(true);
       expect(scrollOptions.at(-1)).toEqual({ behavior: "auto", block: "center" });
+    });
+  });
+
+  it("switches to existing spec review and creates an existing-spec session", async () => {
+    createSessionMock.mockResolvedValue({
+      session: {
+        id: "sess_existing",
+        title: "uploaded-spec.md",
+        status: "debating",
+        phase: "analysis",
+        prompt: "HUMAN REVIEW CONTEXT:\nNo additional context supplied.",
+        executionPolicy: { mode: "existing_spec" }
+      },
+      summary: {
+        currentUnderstanding: "Existing spec review session created. Phase 1 is starting.",
+        recommendation: "Watch live progress while Crossfire reviews the supplied documents.",
+        changedSinceLastCheckpoint: ["Session created"],
+        openRisks: [],
+        decisionsNeeded: []
+      },
+      activeRun: {
+        id: "run_existing",
+        sessionId: "sess_existing",
+        kind: "create",
+        status: "running",
+        phase: "analysis",
+        startedAt: new Date().toISOString()
+      },
+      recentRuns: []
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Review Existing Spec" }));
+    fireEvent.change(screen.getByLabelText("Specification text"), {
+      target: { value: "# Existing Spec" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+
+    await waitFor(() => {
+      expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        mode: "existing_spec",
+        title: "Existing spec review",
+        existingSpec: { spec: "# Existing Spec" }
+      }));
     });
   });
 });

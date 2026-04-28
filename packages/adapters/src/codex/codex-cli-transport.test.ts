@@ -227,4 +227,69 @@ describe("CodexCliTransport", () => {
       { kind: "result", text: "{\"ok\":true}" }
     ]);
   });
+
+  it("suppresses the codex stdin hint that appears even for prompt-argument exec", async () => {
+    const transport = new CodexCliTransport({
+      spawnProcess: () =>
+        createFakeChild({
+          stdoutLines: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+            JSON.stringify({
+              type: "item.completed",
+              item: { id: "item_1", type: "agent_message", text: "codex-ok" }
+            }),
+            JSON.stringify({ type: "turn.completed" })
+          ],
+          stderrLines: ["Reading additional input from stdin..."]
+        })
+    });
+
+    const events = [];
+
+    for await (const event of transport.runTurn({
+      sessionId: "sess_1",
+      prompt: "Reply with exactly: codex-ok"
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { kind: "thread_started", threadId: "thread-1" },
+      { kind: "result", text: "codex-ok" }
+    ]);
+  });
+
+  it("suppresses the non-fatal rollout-recording thread error after successful resume turns", async () => {
+    const transport = new CodexCliTransport({
+      spawnProcess: () =>
+        createFakeChild({
+          stdoutLines: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+            JSON.stringify({
+              type: "item.completed",
+              item: { id: "item_1", type: "agent_message", text: "SECOND" }
+            }),
+            JSON.stringify({ type: "turn.completed" })
+          ],
+          stderrLines: [
+            "2026-04-27T13:03:27.276636Z ERROR codex_core::session: failed to record rollout items: thread thread-1 not found"
+          ]
+        })
+    });
+
+    const events = [];
+
+    for await (const event of transport.runTurn({
+      sessionId: "sess_1",
+      prompt: "Reply with exactly: SECOND",
+      resumeThreadId: "thread-1"
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { kind: "thread_started", threadId: "thread-1" },
+      { kind: "result", text: "SECOND" }
+    ]);
+  });
 });

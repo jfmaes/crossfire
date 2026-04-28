@@ -2,6 +2,7 @@ import "./styles/app.css";
 import { CheckpointCard } from "./components/checkpoint-card";
 import { RuntimeStatusCard } from "./components/runtime-status-card";
 import { SessionForm } from "./components/session-form";
+import { ExistingSpecForm } from "./components/existing-spec-form";
 import { PhaseIndicator } from "./components/phase-indicator";
 import { AnalysisCard } from "./components/analysis-card";
 import { DebateCard } from "./components/debate-card";
@@ -22,6 +23,7 @@ import {
   getSession,
   listSessions,
   type RuntimeStatus,
+  type ExistingSpecInput,
   type SessionPayload,
   type SessionListItem
 } from "./lib/api";
@@ -42,6 +44,7 @@ function parseHashRoute(): { sessionId: string | null; runId: string | null } {
 }
 
 export function App() {
+  const [homeMode, setHomeMode] = useState<"new_spec" | "existing_spec">("new_spec");
   const [session, setSession] = useState<SessionPayload | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [previousSessions, setPreviousSessions] = useState<SessionListItem[]>([]);
@@ -129,6 +132,7 @@ export function App() {
       try {
         const payload = await getSession({ sessionId: session.session.id, token });
         if (cancelled) return;
+        if (!payload) return;
 
         setPreviousSessions((prev) => prev.map((s) =>
           s.id === session.session.id
@@ -408,6 +412,30 @@ export function App() {
     }
   }
 
+  async function handleCreateExistingSpec(input: {
+    title: string;
+    prompt: string;
+    existingSpec: ExistingSpecInput;
+  }) {
+    setError(null);
+    try {
+      const payload = await createSession({
+        title: input.title,
+        prompt: input.prompt,
+        token,
+        mode: "existing_spec",
+        existingSpec: input.existingSpec
+      });
+      setPreviousSessions((prev) => [
+        { id: payload.session.id, title: payload.session.title, status: payload.session.status, phase: payload.session.phase },
+        ...prev
+      ]);
+      setSessionAndNavigate(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    }
+  }
+
   async function handleContinue(humanResponse: string) {
     if (!session) return;
     setError(null);
@@ -474,10 +502,40 @@ export function App() {
   }
 
   function getPhaseExplanation(): string {
+    const sessionMode = session?.session.executionPolicy?.mode ?? "new_spec";
+
     if (isFinalized) return "Session complete. The spec has been approved and finalized.";
     if (session && restartingSessionId === session.session.id && phase === "analysis") {
       return "Crossfire is rerunning this session from Phase 1. The previous checkpoint has been cleared from the viewer.";
     }
+    if (sessionMode === "existing_spec") {
+      if (session?.activeRun) {
+        switch (phase) {
+          case "analysis":
+            return "Both models are reviewing the supplied spec and implementation plan before aligning on questions.";
+          case "approach_debate":
+            return "Using the supplied documents and your answers, the models are debating the revision strategy.";
+          case "spec_generation":
+            return "The models are revising the supplied specification and implementation plan.";
+          default:
+            return "Crossfire is actively processing this session.";
+        }
+      }
+
+      switch (phase) {
+        case "analysis":
+          return "Both models are reviewing the supplied spec and implementation plan before aligning on questions.";
+        case "interview":
+          return "The models found questions that need answers before they can revise the supplied documents.";
+        case "approach_debate":
+          return "Using the supplied documents and your answers, the models are debating the revision strategy.";
+        case "spec_generation":
+          return "The models are revising the supplied specification and implementation plan.";
+        default:
+          return "";
+      }
+    }
+
     if (session?.activeRun) {
       switch (phase) {
         case "analysis":
@@ -675,7 +733,31 @@ export function App() {
 
       {!session && (
         <>
-          <SessionForm onCreate={handleCreate} showGrounding loadingLabel="Analyzing problem & aligning on interview questions (GPT + Claude)..." />
+          <div className="mode-tabs" role="tablist" aria-label="Session type">
+            <button
+              role="tab"
+              aria-selected={homeMode === "new_spec"}
+              onClick={() => setHomeMode("new_spec")}
+            >
+              New Spec
+            </button>
+            <button
+              role="tab"
+              aria-selected={homeMode === "existing_spec"}
+              onClick={() => setHomeMode("existing_spec")}
+            >
+              Review Existing Spec
+            </button>
+          </div>
+          {homeMode === "new_spec" ? (
+            <SessionForm
+              onCreate={handleCreate}
+              showGrounding
+              loadingLabel="Analyzing problem & aligning on interview questions (GPT + Claude)..."
+            />
+          ) : (
+            <ExistingSpecForm onCreate={handleCreateExistingSpec} />
+          )}
           <SessionList
             sessions={previousSessions}
             onSelect={handleLoadSession}
