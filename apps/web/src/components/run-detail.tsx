@@ -7,6 +7,7 @@ import {
   type SessionRun,
   type SessionRunEvent
 } from "../lib/api";
+import { deriveMilestones } from "./progress-milestones";
 
 function formatTimestamp(value: string): string {
   try {
@@ -153,6 +154,7 @@ function metadataEntries(metadata?: ProgressEventMetadata | null): Array<[string
 export function RunDetail({ run }: { run: SessionRun | null }) {
   const [events, setEvents] = useState<SessionRunEvent[]>([]);
   const [loading, setLoading] = useState(false);
+  const recentMilestones = deriveMilestones(events).slice(-5).reverse();
 
   useEffect(() => {
     if (!run) {
@@ -219,6 +221,17 @@ export function RunDetail({ run }: { run: SessionRun | null }) {
         {loading && <div className="run-detail__empty">Loading run events\u2026</div>}
         {!loading && events.length === 0 && (
           <div className="run-detail__empty">No persisted events for this run.</div>
+        )}
+        {!loading && recentMilestones.length > 0 && (
+          <div className="run-detail__milestones">
+            <div className="run-detail__milestones-heading">Recent milestones</div>
+            {recentMilestones.map((milestone) => (
+              <div key={milestone.id} className="run-detail__milestone">
+                <span className="run-detail__event-time">{formatTimestamp(milestone.createdAt)}</span>
+                <span className="run-detail__event-message">{milestone.text}</span>
+              </div>
+            ))}
+          </div>
         )}
         {!loading && events.map((event) => (
           <div key={event.id} className={`run-detail__event run-detail__event--${event.type}`}>
