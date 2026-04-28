@@ -197,8 +197,9 @@ export function createWorkflowService(input: CreateWorkflowServiceInput) {
   });
 
   return {
-    startParallelExistingSpecReview(inputValue: ExistingSpecWorkflowInput) {
-      return engine.startWorkflow("parallel_existing_spec_review", inputValue);
+    async startParallelExistingSpecReview(inputValue: ExistingSpecWorkflowInput) {
+      const run = await engine.startWorkflow("parallel_existing_spec_review", inputValue);
+      return assertSingleExistingSpecReviewRun(run);
     },
 
     async getWorkflowRun(id: string) {
@@ -209,10 +210,10 @@ export function createWorkflowService(input: CreateWorkflowServiceInput) {
       }
 
       if (persisted.status !== "settled") {
-        return reconcileWorkflowRun(id);
+        return validateSingleExistingSpecReviewRun(await reconcileWorkflowRun(id));
       }
 
-      return engine.getWorkflowRun(id);
+      return validateSingleExistingSpecReviewRun(await engine.getWorkflowRun(id));
     },
 
     async listWorkflowRuns(filter?: WorkflowRunFilter) {
@@ -226,9 +227,9 @@ export function createWorkflowService(input: CreateWorkflowServiceInput) {
         }
       }
 
-      const listedRuns = await engine.listWorkflowRuns(
+      const listedRuns = (await engine.listWorkflowRuns(
         filter?.specId ? { specId: filter.specId } : undefined
-      );
+      )).map((run) => assertSingleExistingSpecReviewRun(run));
 
       return listedRuns.filter((run) => {
         if (filter?.status && run.status !== filter.status) {
@@ -264,6 +265,24 @@ export function createWorkflowService(input: CreateWorkflowServiceInput) {
         childSessionToWorkflowRunId.set(child.sessionId, run.id);
       }
     }
+  }
+
+  function assertSingleExistingSpecReviewRun(run: WorkflowRunView) {
+    if (run.specId === "parallel_existing_spec_review" && run.childSessions.length !== 1) {
+      throw new Error(
+        `Existing spec review workflow must use exactly one child session; got ${run.childSessions.length}.`
+      );
+    }
+
+    return run;
+  }
+
+  function validateSingleExistingSpecReviewRun(run: WorkflowRunView | null) {
+    if (!run) {
+      return null;
+    }
+
+    return assertSingleExistingSpecReviewRun(run);
   }
 
   function reconcileWorkflowRun(

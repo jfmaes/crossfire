@@ -73,7 +73,7 @@ describe("createWorkflowService", () => {
     }
   });
 
-  it("launches four child sessions, monitors them into blocked states, and refreshes a resumed child to its next checkpoint", async () => {
+  it("launches one child session, monitors it into a blocked state, and refreshes it to its next checkpoint", async () => {
     const db = createInMemoryDatabase();
     const sessionService = createSessionService({
       repository: new SessionRepository(db),
@@ -95,39 +95,33 @@ describe("createWorkflowService", () => {
       }
     });
 
-    expect(started.childSessions).toHaveLength(4);
+    expect(started.childSessions).toHaveLength(1);
     expect(started.childSessions.map((child) => child.label)).toEqual([
-      "requirements",
-      "architecture",
-      "release-risk",
-      "operability"
+      "existing-spec-review"
     ]);
 
     const blocked = await waitForWorkflowRun(
       workflowService,
       started.id,
-      (run) => run.status === "partially_blocked" && run.summary.humanBlockedChildren === 4
+      (run) => run.status === "partially_blocked" && run.summary.humanBlockedChildren === 1
     );
 
     expect(blocked.summary).toMatchObject({
-      totalChildren: 4,
-      humanBlockedChildren: 4,
-      escalationCount: 4
+      totalChildren: 1,
+      humanBlockedChildren: 1,
+      escalationCount: 1
     });
-    expect(blocked.escalations).toHaveLength(4);
+    expect(blocked.escalations).toHaveLength(1);
     expect(blocked.escalations.map((brief) => brief.questions)).toEqual([
-      ["What is the target platform?"],
-      ["What is the target platform?"],
-      ["What is the target platform?"],
       ["What is the target platform?"]
     ]);
 
-    const requirementsChild = blocked.childSessions.find((child) => child.label === "requirements");
-    expect(requirementsChild).toBeDefined();
+    const reviewChild = blocked.childSessions[0];
+    expect(reviewChild).toBeDefined();
 
     await workflowService.handleHumanResponse(
       blocked.id,
-      requirementsChild!.sessionId,
+      reviewChild!.sessionId,
       "Target web first."
     );
 
@@ -135,23 +129,23 @@ describe("createWorkflowService", () => {
       workflowService,
       blocked.id,
       (run) => {
-        const child = run.childSessions.find((candidate) => candidate.sessionId === requirementsChild!.sessionId);
+        const child = run.childSessions.find((candidate) => candidate.sessionId === reviewChild!.sessionId);
         return child?.snapshot.session.status === "checkpoint"
           && child.latestBrief?.questions[0] === "Approve approach to proceed to spec generation";
       }
     );
 
-    const updatedRequirementsChild = resumed.childSessions.find(
-      (child) => child.sessionId === requirementsChild!.sessionId
+    const updatedReviewChild = resumed.childSessions.find(
+      (child) => child.sessionId === reviewChild!.sessionId
     );
-    expect(updatedRequirementsChild?.state).toBe("human_blocked");
-    expect(updatedRequirementsChild?.latestBrief).toMatchObject({
+    expect(updatedReviewChild?.state).toBe("human_blocked");
+    expect(updatedReviewChild?.latestBrief).toMatchObject({
       kind: "human_blocked",
       questions: ["Approve approach to proceed to spec generation"]
     });
     expect(resumed.summary).toMatchObject({
-      totalChildren: 4,
-      humanBlockedChildren: 4
+      totalChildren: 1,
+      humanBlockedChildren: 1
     });
   });
 
@@ -181,7 +175,7 @@ describe("createWorkflowService", () => {
     await waitForWorkflowRun(
       initialWorkflowService,
       started.id,
-      (run) => run.status === "partially_blocked" && run.summary.humanBlockedChildren === 4
+      (run) => run.status === "partially_blocked" && run.summary.humanBlockedChildren === 1
     );
 
     initialWorkflowService.dispose();
@@ -190,8 +184,8 @@ describe("createWorkflowService", () => {
       id: started.id,
       status: "launching",
       summary: {
-        totalChildren: 4,
-        runningChildren: 4,
+        totalChildren: 1,
+        runningChildren: 1,
         humanBlockedChildren: 0,
         resumingChildren: 0,
         finalizedChildren: 0,
@@ -217,12 +211,12 @@ describe("createWorkflowService", () => {
       id: started.id,
       status: "partially_blocked",
       summary: {
-        totalChildren: 4,
-        humanBlockedChildren: 4,
-        escalationCount: 4
+        totalChildren: 1,
+        humanBlockedChildren: 1,
+        escalationCount: 1
       }
     });
-    expect(reconciled?.childSessions).toHaveLength(4);
+    expect(reconciled?.childSessions).toHaveLength(1);
 
     const listed = await rehydratedWorkflowService.listWorkflowRuns({
       specId: "parallel_existing_spec_review",
@@ -233,7 +227,7 @@ describe("createWorkflowService", () => {
       id: started.id,
       status: "partially_blocked",
       summary: {
-        humanBlockedChildren: 4
+        humanBlockedChildren: 1
       }
     });
   });

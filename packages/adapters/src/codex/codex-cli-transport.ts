@@ -119,6 +119,12 @@ function isFatalCodexStderr(line: string): boolean {
     || /^error:/i.test(line);
 }
 
+function isBenignCodexStderr(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed === "Reading additional input from stdin..."
+    || /codex_core::session:\s*failed to record rollout items:\s*thread .* not found/i.test(trimmed);
+}
+
 function looksLikeStructuredPayload(text: string): boolean {
   const trimmed = text.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("```");
@@ -293,11 +299,16 @@ export class CodexCliTransport implements CodexTransport {
     void (async () => {
       try {
         for await (const line of stderrReader) {
-          if (line.trim()) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            if (isBenignCodexStderr(trimmed)) {
+              continue;
+            }
+
             push({ kind: "stderr", text: line });
 
-            if (!emittedTerminalError && isFatalCodexStderr(line)) {
-              push({ kind: "error", message: line.trim() });
+            if (!emittedTerminalError && isFatalCodexStderr(trimmed)) {
+              push({ kind: "error", message: trimmed });
               child.kill("SIGKILL");
             }
           }

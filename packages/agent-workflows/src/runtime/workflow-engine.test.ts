@@ -18,43 +18,28 @@ const workflowInput = {
 } as const;
 
 describe("createWorkflowEngine", () => {
-  it("launches four child sessions and creates escalation briefs for blocked children", async () => {
+  it("launches one child session and creates one escalation brief for the blocked review", async () => {
     const runtime = new FakeWorkflowRuntime({
-      createOutcomes: buildWorkflowSnapshots("run_a", {
-        requirements: {
-          status: "grounding",
-          currentUnderstanding: "Requirements review is in progress.",
-          recommendation: "Continue reviewing the draft."
-        },
-        architecture: {
+      createOutcomes: [
+        buildSnapshot({
+          sessionId: "run_a_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "waiting_for_human",
           currentUnderstanding:
             "The service boundary between checkout and payments is unclear.",
           recommendation: "Answer the ownership question directly.",
           openRisks: ["Retry ownership is not defined."],
           currentQuestion: {
-            id: "q_architecture",
+            id: "q_review",
             text: "Which service owns payment retry orchestration?",
             rationale: "This boundary controls failure handling.",
             recommendation: "Keep retry orchestration inside the payments domain.",
             recommendationReasoning:
               "It keeps retry semantics near the actual payment state machine."
           }
-        },
-        "release-risk": {
-          status: "checkpoint",
-          currentUnderstanding:
-            "The rollout plan needs an approval gate before production exposure.",
-          recommendation: "Approve the staged rollout gate.",
-          openRisks: ["Production rollback steps are not explicit."],
-          decisionsNeeded: ["Approve the staged rollout gate before implementation begins"]
-        },
-        operability: {
-          status: "finalized",
-          currentUnderstanding: "Operability review is complete.",
-          recommendation: "Carry the existing test additions into implementation."
-        }
-      })
+        })
+      ]
     });
     const persistence = new FakeWorkflowPersistence();
     const engine = createWorkflowEngine({
@@ -65,47 +50,40 @@ describe("createWorkflowEngine", () => {
 
     const view = await engine.startWorkflow("parallel_existing_spec_review", workflowInput);
 
-    expect(runtime.createdTemplates).toHaveLength(4);
+    expect(runtime.createdTemplates).toHaveLength(1);
     expect(runtime.createdTemplates.map((template) => template.label)).toEqual([
-      "requirements",
-      "architecture",
-      "release-risk",
-      "operability"
+      "existing-spec-review"
     ]);
     expect(runtime.listRunEventsCalls).toEqual([
-      "run_a_requirements",
-      "run_a_architecture",
-      "run_a_release-risk",
-      "run_a_operability"
+      "run_a_existing-spec-review"
     ]);
 
-    expect(view.childSessions).toHaveLength(4);
+    expect(view.childSessions).toHaveLength(1);
     expect(view.status).toBe("partially_blocked");
     expect(view.summary).toMatchObject({
-      totalChildren: 4,
-      runningChildren: 1,
-      humanBlockedChildren: 2,
+      totalChildren: 1,
+      runningChildren: 0,
+      humanBlockedChildren: 1,
       resumingChildren: 0,
-      finalizedChildren: 1,
+      finalizedChildren: 0,
       erroredChildren: 0,
-      escalationCount: 2
+      escalationCount: 1
     });
 
-    expect(view.escalations).toHaveLength(2);
+    expect(view.escalations).toHaveLength(1);
     expect(view.escalations.map((brief) => brief.label)).toEqual([
-      "architecture",
-      "release-risk"
+      "existing-spec-review"
     ]);
 
-    const architectureChild = view.childSessions.find(
-      (child) => child.sessionId === "run_a_architecture"
+    const reviewChild = view.childSessions.find(
+      (child) => child.sessionId === "run_a_existing-spec-review"
     );
-    expect(architectureChild?.state).toBe("human_blocked");
-    expect(architectureChild?.latestBrief).toMatchObject({
+    expect(reviewChild?.state).toBe("human_blocked");
+    expect(reviewChild?.latestBrief).toMatchObject({
       kind: "human_blocked",
       recommendedDirection: "Keep retry orchestration inside the payments domain."
     });
-    expect(architectureChild?.latestBrief?.questions).toEqual([
+    expect(reviewChild?.latestBrief?.questions).toEqual([
       "Which service owns payment retry orchestration?"
     ]);
 
@@ -118,45 +96,30 @@ describe("createWorkflowEngine", () => {
 
   it("refreshes the chosen child after a human response and updates the latest brief", async () => {
     const runtime = new FakeWorkflowRuntime({
-      createOutcomes: buildWorkflowSnapshots("run_b", {
-        requirements: {
-          status: "grounding",
-          currentUnderstanding: "Requirements review is in progress.",
-          recommendation: "Continue reviewing the draft."
-        },
-        architecture: {
+      createOutcomes: [
+        buildSnapshot({
+          sessionId: "run_b_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "waiting_for_human",
           currentUnderstanding: "The boundary is still unresolved.",
           recommendation: "Answer the ownership question directly.",
           openRisks: ["Retry ownership is not defined."],
           currentQuestion: {
-            id: "q_architecture",
+            id: "q_review",
             text: "Which service owns payment retry orchestration?",
             rationale: "This boundary controls failure handling.",
             recommendation: "Keep retry orchestration inside the payments domain.",
             recommendationReasoning:
               "It keeps retry semantics near the actual payment state machine."
           }
-        },
-        "release-risk": {
-          status: "checkpoint",
-          currentUnderstanding:
-            "The rollout plan needs an approval gate before production exposure.",
-          recommendation: "Approve the staged rollout gate.",
-          openRisks: ["Production rollback steps are not explicit."],
-          decisionsNeeded: ["Approve the staged rollout gate before implementation begins"]
-        },
-        operability: {
-          status: "finalized",
-          currentUnderstanding: "Operability review is complete.",
-          recommendation: "Carry the existing test additions into implementation."
-        }
-      }),
+        })
+      ],
       continueOutcomes: {
-        run_b_architecture: buildSnapshot({
-          sessionId: "run_b_architecture",
-          label: "architecture",
-          lens: "architecture and boundary quality",
+        "run_b_existing-spec-review": buildSnapshot({
+          sessionId: "run_b_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "checkpoint",
           currentUnderstanding: "The workflow now has a proposed boundary split to review.",
           recommendation: "Approve the updated API and payments split.",
@@ -175,7 +138,7 @@ describe("createWorkflowEngine", () => {
     const started = await engine.startWorkflow("parallel_existing_spec_review", workflowInput);
     const updated = await engine.handleHumanResponse(
       started.id,
-      "run_b_architecture",
+      "run_b_existing-spec-review",
       "Keep retry orchestration in the payments domain.",
       {
         approvedBy: "jenkins",
@@ -185,33 +148,30 @@ describe("createWorkflowEngine", () => {
 
     expect(runtime.responses).toEqual([
       {
-        sessionId: "run_b_architecture",
+        sessionId: "run_b_existing-spec-review",
         response: "Keep retry orchestration in the payments domain."
       }
     ]);
     expect(runtime.listRunEventsCalls).toEqual([
-      "run_b_requirements",
-      "run_b_architecture",
-      "run_b_release-risk",
-      "run_b_operability",
-      "run_b_architecture"
+      "run_b_existing-spec-review",
+      "run_b_existing-spec-review"
     ]);
 
-    const architectureChild = updated.childSessions.find(
-      (child) => child.sessionId === "run_b_architecture"
+    const reviewChild = updated.childSessions.find(
+      (child) => child.sessionId === "run_b_existing-spec-review"
     );
-    expect(architectureChild?.state).toBe("human_blocked");
-    expect(architectureChild?.snapshot.session.status).toBe("checkpoint");
-    expect(architectureChild?.latestBrief).toMatchObject({
+    expect(reviewChild?.state).toBe("human_blocked");
+    expect(reviewChild?.snapshot.session.status).toBe("checkpoint");
+    expect(reviewChild?.latestBrief).toMatchObject({
       kind: "human_blocked",
       recommendedDirection: "Approve the updated API and payments split."
     });
-    expect(architectureChild?.latestBrief?.questions).toEqual([
+    expect(reviewChild?.latestBrief?.questions).toEqual([
       "Approve the updated API and payments split"
     ]);
 
     const escalation = updated.escalations.find(
-      (candidate) => candidate.label === "architecture"
+      (candidate) => candidate.label === "existing-spec-review"
     );
     expect(escalation?.questions).toEqual([
       "Approve the updated API and payments split"
@@ -223,28 +183,16 @@ describe("createWorkflowEngine", () => {
 
   it("rejects a foreign child session before calling continueSession", async () => {
     const runtime = new FakeWorkflowRuntime({
-      createOutcomes: buildWorkflowSnapshots("run_c", {
-        requirements: {
-          status: "grounding",
-          currentUnderstanding: "Requirements review is in progress.",
-          recommendation: "Continue reviewing the draft."
-        },
-        architecture: {
+      createOutcomes: [
+        buildSnapshot({
+          sessionId: "run_c_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "waiting_for_human",
           currentUnderstanding: "The boundary is still unresolved.",
           recommendation: "Answer the ownership question directly."
-        },
-        "release-risk": {
-          status: "checkpoint",
-          currentUnderstanding: "The rollout plan needs approval.",
-          recommendation: "Approve the rollout gate."
-        },
-        operability: {
-          status: "finalized",
-          currentUnderstanding: "Operability review is complete.",
-          recommendation: "Carry the existing test additions into implementation."
-        }
-      })
+        })
+      ]
     });
     const persistence = new FakeWorkflowPersistence();
     const engine = createWorkflowEngine({
@@ -271,28 +219,16 @@ describe("createWorkflowEngine", () => {
     vi.setSystemTime(new Date("2026-04-28T10:00:00.000Z"));
 
     const runtime = new FakeWorkflowRuntime({
-      createOutcomes: buildWorkflowSnapshots("run_d", {
-        requirements: {
+      createOutcomes: [
+        buildSnapshot({
+          sessionId: "run_d_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "finalized",
-          currentUnderstanding: "Requirements review is complete.",
+          currentUnderstanding: "Review is complete.",
           recommendation: "Proceed."
-        },
-        architecture: {
-          status: "finalized",
-          currentUnderstanding: "Architecture review is complete.",
-          recommendation: "Proceed."
-        },
-        "release-risk": {
-          status: "finalized",
-          currentUnderstanding: "Release risk review is complete.",
-          recommendation: "Proceed."
-        },
-        operability: {
-          status: "finalized",
-          currentUnderstanding: "Operability review is complete.",
-          recommendation: "Proceed."
-        }
-      })
+        })
+      ]
     });
     const persistence = new FakeWorkflowPersistence();
     const engine = createWorkflowEngine({
@@ -318,15 +254,7 @@ describe("createWorkflowEngine", () => {
   it("updates launch failures to a deterministic blocked state instead of leaving launching", async () => {
     const runtime = new FakeWorkflowRuntime({
       createOutcomes: [
-        buildSnapshot({
-          sessionId: "run_e_requirements",
-          label: "requirements",
-          lens: "requirements and ambiguity gaps",
-          status: "grounding",
-          currentUnderstanding: "Requirements review is in progress.",
-          recommendation: "Continue reviewing the draft."
-        }),
-        new Error("provider failed during architecture launch")
+        new Error("provider failed during review launch")
       ]
     });
     const persistence = new FakeWorkflowPersistence();
@@ -338,13 +266,13 @@ describe("createWorkflowEngine", () => {
 
     await expect(
       engine.startWorkflow("parallel_existing_spec_review", workflowInput)
-    ).rejects.toThrow("provider failed during architecture launch");
+    ).rejects.toThrow("provider failed during review launch");
 
     const [run] = await engine.listWorkflowRuns();
     expect(run?.status).toBe("partially_blocked");
     expect(run?.summary).toMatchObject({
-      totalChildren: 4,
-      runningChildren: 1,
+      totalChildren: 1,
+      runningChildren: 0,
       humanBlockedChildren: 0,
       finalizedChildren: 0,
       erroredChildren: 0
@@ -353,30 +281,18 @@ describe("createWorkflowEngine", () => {
 
   it("restores the prior workflow status when continueSession fails", async () => {
     const runtime = new FakeWorkflowRuntime({
-      createOutcomes: buildWorkflowSnapshots("run_f", {
-        requirements: {
-          status: "grounding",
-          currentUnderstanding: "Requirements review is in progress.",
-          recommendation: "Continue reviewing the draft."
-        },
-        architecture: {
+      createOutcomes: [
+        buildSnapshot({
+          sessionId: "run_f_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
           status: "waiting_for_human",
           currentUnderstanding: "The boundary is still unresolved.",
           recommendation: "Answer the ownership question directly."
-        },
-        "release-risk": {
-          status: "checkpoint",
-          currentUnderstanding: "The rollout plan needs approval.",
-          recommendation: "Approve the rollout gate."
-        },
-        operability: {
-          status: "finalized",
-          currentUnderstanding: "Operability review is complete.",
-          recommendation: "Carry the existing test additions into implementation."
-        }
-      }),
+        })
+      ],
       continueOutcomes: {
-        run_f_architecture: new Error("continue failed")
+        "run_f_existing-spec-review": new Error("continue failed")
       }
     });
     const persistence = new FakeWorkflowPersistence();
@@ -391,7 +307,7 @@ describe("createWorkflowEngine", () => {
     await expect(
       engine.handleHumanResponse(
         started.id,
-        "run_f_architecture",
+        "run_f_existing-spec-review",
         "Keep retry orchestration in the payments domain."
       )
     ).rejects.toThrow("continue failed");
@@ -403,49 +319,21 @@ describe("createWorkflowEngine", () => {
   it("keeps child sessions and escalations scoped to each workflow run", async () => {
     const runtime = new FakeWorkflowRuntime({
       createOutcomes: [
-        ...buildWorkflowSnapshots("run_g", {
-          requirements: {
-            status: "grounding",
-            currentUnderstanding: "Run G requirements review is in progress.",
-            recommendation: "Continue reviewing the draft."
-          },
-          architecture: {
-            status: "waiting_for_human",
-            currentUnderstanding: "Run G architecture needs an answer.",
-            recommendation: "Answer the ownership question directly."
-          },
-          "release-risk": {
-            status: "checkpoint",
-            currentUnderstanding: "Run G release risk needs approval.",
-            recommendation: "Approve the rollout gate."
-          },
-          operability: {
-            status: "finalized",
-            currentUnderstanding: "Run G operability review is complete.",
-            recommendation: "Carry the existing test additions into implementation."
-          }
+        buildSnapshot({
+          sessionId: "run_g_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
+          status: "waiting_for_human",
+          currentUnderstanding: "Run G review needs an answer.",
+          recommendation: "Answer the ownership question directly."
         }),
-        ...buildWorkflowSnapshots("run_h", {
-          requirements: {
-            status: "finalized",
-            currentUnderstanding: "Run H requirements review is complete.",
-            recommendation: "Proceed."
-          },
-          architecture: {
-            status: "finalized",
-            currentUnderstanding: "Run H architecture review is complete.",
-            recommendation: "Proceed."
-          },
-          "release-risk": {
-            status: "finalized",
-            currentUnderstanding: "Run H release risk review is complete.",
-            recommendation: "Proceed."
-          },
-          operability: {
-            status: "finalized",
-            currentUnderstanding: "Run H operability review is complete.",
-            recommendation: "Proceed."
-          }
+        buildSnapshot({
+          sessionId: "run_h_existing-spec-review",
+          label: "existing-spec-review",
+          lens: "end-to-end specification review",
+          status: "finalized",
+          currentUnderstanding: "Run H review is complete.",
+          recommendation: "Proceed."
         })
       ]
     });
@@ -462,8 +350,8 @@ describe("createWorkflowEngine", () => {
       title: "Checkout spec review 2"
     });
 
-    expect(first.childSessions).toHaveLength(4);
-    expect(second.childSessions).toHaveLength(4);
+    expect(first.childSessions).toHaveLength(1);
+    expect(second.childSessions).toHaveLength(1);
     expect(first.childSessions.every((child) => child.sessionId.startsWith("run_g_"))).toBe(true);
     expect(second.childSessions.every((child) => child.sessionId.startsWith("run_h_"))).toBe(true);
 
@@ -615,7 +503,8 @@ class FakeWorkflowPersistence implements WorkflowPersistence {
     brief: WorkflowRunView["escalations"][number]
   ) {
     const existingIndex = this.escalationRecords.findIndex(
-      (candidate) => candidate.sessionId === sessionId
+      (candidate) =>
+        candidate.workflowRunId === workflowRunId && candidate.sessionId === sessionId
     );
     const record = {
       workflowRunId,
@@ -678,41 +567,6 @@ class FakeWorkflowPersistence implements WorkflowPersistence {
         .map((candidate) => candidate.brief)
     );
   }
-}
-
-function buildWorkflowSnapshots(
-  prefix: string,
-  input: Record<
-    "requirements" | "architecture" | "release-risk" | "operability",
-    Omit<Parameters<typeof buildSnapshot>[0], "sessionId" | "label" | "lens">
-  >
-): WorkflowSessionSnapshot[] {
-  return [
-    buildSnapshot({
-      sessionId: `${prefix}_requirements`,
-      label: "requirements",
-      lens: "requirements and ambiguity gaps",
-      ...input.requirements
-    }),
-    buildSnapshot({
-      sessionId: `${prefix}_architecture`,
-      label: "architecture",
-      lens: "architecture and boundary quality",
-      ...input.architecture
-    }),
-    buildSnapshot({
-      sessionId: `${prefix}_release-risk`,
-      label: "release-risk",
-      lens: "implementation and rollout risk",
-      ...input["release-risk"]
-    }),
-    buildSnapshot({
-      sessionId: `${prefix}_operability`,
-      label: "operability",
-      lens: "testing, failure modes, and operability",
-      ...input.operability
-    })
-  ];
 }
 
 function buildSnapshot(input: {

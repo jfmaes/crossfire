@@ -42,6 +42,8 @@ describe("buildStructuredTurnPrompt", () => {
     expect(prompt).not.toContain("You are Dr. Chen, a principal systems architect");
     expect(prompt).not.toContain("ORIGINAL PROBLEM STATEMENT:");
     expect(prompt).not.toContain("Design a dual-model planning system");
+    expect(prompt).toContain('Do not say things like "Here is the JSON" or "Below is the object".');
+    expect(prompt).toContain("If you add any text outside the JSON object, your turn will be rejected.");
     expect(prompt).not.toContain("actor");
     expect(prompt).not.toContain("degraded");
   });
