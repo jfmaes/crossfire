@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProgressFeed } from "./progress-feed";
 
@@ -23,6 +23,7 @@ describe("ProgressFeed", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
@@ -112,5 +113,87 @@ describe("ProgressFeed", () => {
 
     expect(screen.getByText("Extracting requested changes from large feedback")).toBeTruthy();
     expect(screen.getByText("blocked: feedback too large")).toBeTruthy();
+  });
+
+  it("renders the latest concrete milestone as the active headline when persisted events exist", async () => {
+    getRunEventsMock.mockResolvedValue([
+      {
+        id: "evt_1",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "phase_start",
+        phase: "analysis",
+        message: "Phase 1: Dual Analysis (GPT + Claude in parallel)",
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: "evt_2",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "model_done",
+        model: "claude",
+        phase: "analysis",
+        elapsedMs: 176497,
+        message: "Done in 176.5s — 10989 chars",
+        createdAt: new Date().toISOString()
+      }
+    ]);
+
+    render(<ProgressFeed sessionId="sess_1" runId="run_1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Claude finished analysis in 2m 56s", {
+          selector: ".progress-feed__milestone-title"
+        })
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows a rolling list of recent milestones under the active area", async () => {
+    getRunEventsMock.mockResolvedValue([
+      {
+        id: "evt_1",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "phase_start",
+        phase: "analysis",
+        message: "Phase 1: Dual Analysis (GPT + Claude in parallel)",
+        createdAt: new Date("2026-04-27T17:28:34.760Z").toISOString()
+      },
+      {
+        id: "evt_2",
+        runId: "run_1",
+        sessionId: "sess_1",
+        type: "model_done",
+        model: "claude",
+        phase: "analysis",
+        elapsedMs: 176497,
+        message: "Done in 176.5s — 10989 chars",
+        createdAt: new Date("2026-04-27T17:31:31.260Z").toISOString()
+      }
+    ]);
+
+    render(<ProgressFeed sessionId="sess_1" runId="run_1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Recent milestones", {
+          selector: ".progress-feed__milestones-heading"
+        })
+      ).toBeTruthy();
+    });
+
+    expect(
+      screen.getByText("Claude finished analysis in 2m 56s", {
+        selector: ".progress-feed__milestone-title"
+      })
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Phase 1: Dual Analysis (GPT + Claude in parallel)", {
+        selector: ".progress-feed__milestone-text"
+      })
+    ).toBeTruthy();
+    expect(screen.getAllByText("Claude finished analysis in 2m 56s").length).toBeGreaterThan(1);
   });
 });
