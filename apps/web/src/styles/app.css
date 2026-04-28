@@ -1977,6 +1977,7 @@ body {
 
 .progress-feed__milestone {
   grid-column: 1 / -1;
+  margin-bottom: 12px;
   padding: 12px 14px;
 }
 
@@ -1990,6 +1991,7 @@ body {
 
 .progress-feed__milestones,
 .run-detail__milestones {
+  margin-bottom: 12px;
   padding: 10px 12px;
 }
 
