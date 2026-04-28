@@ -1967,6 +1967,72 @@ body {
   color: var(--ink-secondary);
 }
 
+.progress-feed__milestone,
+.progress-feed__milestones,
+.run-detail__milestones {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--bg-surface);
+}
+
+.progress-feed__milestone {
+  grid-column: 1 / -1;
+  padding: 12px 14px;
+}
+
+.progress-feed__milestone-title,
+.progress-feed__milestone-text,
+.run-detail__milestones .run-detail__event-message {
+  color: var(--ink);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.progress-feed__milestones,
+.run-detail__milestones {
+  padding: 10px 12px;
+}
+
+.progress-feed__milestones {
+  grid-column: 1 / -1;
+}
+
+.progress-feed__milestones-heading,
+.run-detail__milestones-heading {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-secondary);
+}
+
+.progress-feed__milestone-row,
+.run-detail__milestone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.progress-feed__milestone-row + .progress-feed__milestone-row,
+.run-detail__milestone + .run-detail__milestone {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.progress-feed__milestone-time,
+.run-detail__milestones .run-detail__event-time {
+  color: var(--muted);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.progress-feed__milestone-text {
+  flex: 1;
+  min-width: 0;
+}
+
 .progress-feed__log {
   padding: 8px 14px;
   max-height: 240px;
