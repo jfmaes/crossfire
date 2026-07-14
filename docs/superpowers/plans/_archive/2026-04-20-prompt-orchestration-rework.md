@@ -1,3 +1,7 @@
+---
+status: complete
+updated: 2026-04-25
+---
 # Prompt & Orchestration Rework Implementation Plan
 
 **Status:** Rebased against the current tree on 2026-04-20

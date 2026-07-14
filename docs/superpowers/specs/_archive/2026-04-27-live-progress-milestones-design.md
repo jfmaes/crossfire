@@ -1,3 +1,8 @@
+---
+status: complete
+updated: 2026-07-13
+---
+
 # Live Progress Milestones Design
 
 **Date:** 2026-04-27  

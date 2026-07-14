@@ -1,3 +1,7 @@
+---
+status: complete
+updated: 2026-04-25
+---
 # Question Debate Consensus Implementation Plan
 
 **Goal:** Replace heuristic question fan-in with a bounded multi-turn consensus debate for interview-question selection.

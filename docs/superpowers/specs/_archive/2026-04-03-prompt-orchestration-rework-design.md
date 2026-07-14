@@ -1,3 +1,8 @@
+---
+status: complete
+updated: 2026-07-13
+---
+
 # Prompt & Orchestration Rework Plan
 
 **Date:** 2026-04-03

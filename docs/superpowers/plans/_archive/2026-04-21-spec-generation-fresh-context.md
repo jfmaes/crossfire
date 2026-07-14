@@ -1,3 +1,7 @@
+---
+status: complete
+updated: 2026-04-25
+---
 # Spec Generation Fresh-Context Handoff Implementation Plan
 
 **Goal:** Make spec generation consume a canonical final approach handoff in fresh context windows, and remove lossy compaction from the authority path.
